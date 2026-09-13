@@ -333,9 +333,13 @@ import MuralCore
     #if DEBUG
     func prepareEndedPreview() {
         guard ProcessInfo.processInfo.arguments.contains("--preview") else { return }
+        if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--preview-language=") }) {
+            selectLanguage(String(argument.dropFirst("--preview-language=".count)))
+        }
         selectedTheme = language.themes.first { $0.id == "coffee" }
         var record = SessionRecord(languageID: language.id, themeID: selectedTheme?.id, title: selectedTheme?.title)
-        record.append(Fragment(speaker: .assistant, text: "Jeg liker kaffe.", startMS: 0, endMS: 1000))
+        let sample = ["nb": "Jeg liker kaffe.", "de": "Ich mag Kaffee.", "it": "Mi piace il caffè.", "pt": "Eu gosto de café.", "zh": "我喜欢喝咖啡。"]
+        record.append(Fragment(speaker: .assistant, text: sample[language.id] ?? language.greeting, startMS: 0, endMS: 1000))
         record.translations[MeaningRequest.cacheKey(revisionKey: record.passages[0].revisionKey, language: "English")] = "I like coffee."
         session = record; state = .closing; finish(final: true)
     }

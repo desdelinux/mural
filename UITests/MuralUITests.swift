@@ -1,6 +1,133 @@
 import XCTest
 
 final class MuralUITests: XCTestCase {
+    override func setUpWithError() throws { continueAfterFailure = false }
+
+    private func reveal(_ element: XCUIElement, in app: XCUIApplication) {
+        for _ in 0..<8 {
+            let footer = app.buttons["onboarding-continue"].frame
+            if element.isHittable && element.frame.minY >= 110 && element.frame.maxY < footer.minY - 16 { return }
+            app.swipeUp()
+        }
+        XCTAssertTrue(element.isHittable)
+    }
+
+    private func checkNewOnboarding(id: String, greeting: String) {
+        let app = XCUIApplication()
+        app.launchArguments = ["--preview", "--preview-onboarding"]
+        app.launch()
+        let choice = app.buttons["onboarding-language-\(id)"]
+        XCTAssertTrue(choice.waitForExistence(timeout: 10))
+        reveal(choice, in: app)
+        choice.tap()
+        XCTAssertTrue(choice.isSelected)
+        let screen = XCTAttachment(screenshot: app.screenshot())
+        screen.name = "Language selection - \(id)"; screen.lifetime = .keepAlways; add(screen)
+        app.buttons["onboarding-continue"].tap()
+        XCTAssertTrue(app.buttons["onboarding-meaning-picker"].waitForExistence(timeout: 5))
+        app.buttons["onboarding-continue"].tap()
+        XCTAssertTrue(app.staticTexts["target-caption"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["target-caption"].label, greeting)
+        XCTAssertEqual(app.staticTexts["meaning-caption"].label, "Hi!")
+        XCTAssertEqual(app.staticTexts["microphone-status"].label, "Microphone off")
+        if id == "zh" {
+            XCTAssertEqual(app.staticTexts["pinyin-reading"].label, "nǐhǎo！")
+            app.buttons["pinyin-toggle"].tap()
+            XCTAssertFalse(app.staticTexts["pinyin-reading"].exists)
+            app.buttons["pinyin-toggle"].tap()
+            XCTAssertTrue(app.staticTexts["pinyin-reading"].exists)
+        }
+    }
+
+    func testGermanOnboarding() { checkNewOnboarding(id: "de", greeting: "Hallo!") }
+    func testItalianOnboarding() { checkNewOnboarding(id: "it", greeting: "Ciao!") }
+    func testBrazilianPortugueseOnboarding() { checkNewOnboarding(id: "pt", greeting: "Olá!") }
+    func testMandarinOnboardingWithOptionalPinyin() { checkNewOnboarding(id: "zh", greeting: "你好！") }
+
+    func testMandarinSelectionAtLargestAccessibilityTextSize() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--preview", "--preview-onboarding", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+        app.launch()
+        let choice = app.buttons["onboarding-language-zh"]
+        XCTAssertTrue(choice.waitForExistence(timeout: 10))
+        reveal(choice, in: app)
+        choice.tap()
+        XCTAssertTrue(choice.isSelected)
+        XCTAssertTrue(app.buttons["onboarding-continue"].isHittable)
+        app.buttons["onboarding-continue"].tap()
+        XCTAssertTrue(app.buttons["onboarding-meaning-picker"].waitForExistence(timeout: 5))
+        let privacy = app.descendants(matching: .any).matching(identifier: "onboarding-privacy-policy").firstMatch
+        reveal(privacy, in: app)
+        XCTAssertTrue(app.staticTexts["onboarding-ai-consent"].exists)
+        XCTAssertTrue(app.buttons["onboarding-continue"].isHittable)
+        let screen = XCTAttachment(screenshot: app.screenshot())
+        screen.name = "Mandarin onboarding - largest accessibility text"; screen.lifetime = .keepAlways; add(screen)
+        app.buttons["onboarding-continue"].tap()
+        XCTAssertTrue(app.staticTexts["target-caption"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["target-caption"].label, "你好！")
+    }
+
+    func testNewLanguageSettingsThemesWordsAndReturnToNorwegian() {
+        let app = launch()
+        for (selection, name, greeting, theme) in [
+            ("German · Germany", "German", "Hallo!", "Ein Kaffee?"),
+            ("Italian · Italy", "Italian", "Ciao!", "Un caffè?"),
+            ("Portuguese · Brazil", "Portuguese", "Olá!", "Um cafezinho?"),
+            ("Mandarin Chinese · Mainland China", "Mandarin Chinese", "你好！", "喝杯咖啡？")
+        ] {
+            app.buttons["Settings"].tap()
+            app.buttons["learning-language-picker"].tap()
+            app.buttons[selection].tap()
+            app.buttons["Done"].tap()
+            XCTAssertEqual(app.staticTexts["target-caption"].label, greeting)
+            app.tabBars.buttons["Themes"].tap()
+            XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label CONTAINS %@", theme)).firstMatch.exists)
+            app.tabBars.buttons["Words"].tap()
+            XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label ==[c] %@", "Little by little · \(name)")).firstMatch.exists)
+            app.tabBars.buttons["Talk"].tap()
+        }
+        app.buttons["Settings"].tap()
+        app.buttons["learning-language-picker"].tap()
+        app.buttons["Norwegian · Bokmål"].tap()
+        app.buttons["Done"].tap()
+        XCTAssertEqual(app.staticTexts["target-caption"].label, "Hei!")
+        XCTAssertFalse(app.buttons["pinyin-toggle"].exists)
+    }
+
+    func testSimplifiedChineseMeaningsAreAvailableInOnboarding() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--preview", "--preview-onboarding"]
+        app.launch()
+        XCTAssertTrue(app.buttons["onboarding-continue"].waitForExistence(timeout: 10))
+        app.buttons["onboarding-continue"].tap()
+        app.buttons["onboarding-meaning-picker"].tap()
+        app.buttons["Chinese (Simplified)"].tap()
+        XCTAssertEqual(app.staticTexts["onboarding-meaning-example"].label, "你好！")
+        app.buttons["onboarding-continue"].tap()
+        XCTAssertTrue(app.staticTexts["meaning-caption"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["meaning-caption"].label, "你好！")
+    }
+
+    func testMandarinTranscriptRetainsSourceTextAndPinyinAfterReset() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--preview", "--ended-conversation", "--preview-language=zh"]
+        app.launch()
+        XCTAssertTrue(app.buttons["new-conversation"].waitForExistence(timeout: 10))
+        XCTAssertEqual(app.staticTexts["target-caption"].label, "我喜欢喝咖啡。")
+        XCTAssertEqual(app.staticTexts.matching(identifier: "pinyin-reading").firstMatch.label, "wǒ xǐhuān hē kāfēi。")
+        app.buttons["Conversation transcript"].tap()
+        XCTAssertTrue(app.staticTexts["我喜欢喝咖啡。"].exists)
+        XCTAssertEqual(app.staticTexts.matching(identifier: "pinyin-reading").firstMatch.label, "wǒ xǐhuān hē kāfēi。")
+        let screen = XCTAttachment(screenshot: app.screenshot())
+        screen.name = "Mandarin transcript and pinyin"; screen.lifetime = .keepAlways; add(screen)
+        app.buttons["Done"].tap()
+        app.buttons["new-conversation"].tap()
+        XCTAssertEqual(app.staticTexts["target-caption"].label, "你好！")
+        app.tabBars.buttons["Words"].tap()
+        app.buttons["Past conversations"].tap()
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "喝杯咖啡？")).firstMatch.exists)
+    }
+
     private func launch(ended: Bool = false) -> XCUIApplication {
         let app = XCUIApplication(); app.launchArguments = ["--preview"] + (ended ? ["--ended-conversation"] : [])
         app.launch(); return app

@@ -29,7 +29,7 @@ struct OnboardingView: View {
             HStack {
                 if step == 1 {
                     Button { move(to: 0) } label: {
-                        Image(systemName: "chevron.left").font(.body.weight(.medium)).frame(width: 42, height: 42)
+                        Image(systemName: "chevron.left").font(.system(size: 20, weight: .medium)).frame(width: 44, height: 44)
                             .modifier(SoftGlass())
                     }.accessibilityLabel("Back to learning language").accessibilityIdentifier("onboarding-back")
                 } else { Brand() }
@@ -58,26 +58,24 @@ struct OnboardingView: View {
                         if step == 0 { languageStep }
                         else { meaningStep }
                     }.id(step).transition(reduceMotion ? .identity : .opacity.combined(with: .offset(y: 14)))
+                    if step == 1 && typeSize.isAccessibilitySize { consentDetails }
                 }.padding(.horizontal, 26).padding(.bottom, 22)
-            }.scrollIndicators(.hidden)
+            }.scrollIndicators(.hidden).id(step)
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 12) {
-                if step == 1 {
-                    Text(AIProcessingConsent.summary)
-                        .font(.footnote).foregroundStyle(MuralColor.secondary).multilineTextAlignment(.center)
-                        .accessibilityIdentifier("onboarding-ai-consent")
-                    Link("Privacy policy", destination: URL(string: "https://mural.chat/privacy/")!)
-                        .font(.footnote).underline().accessibilityIdentifier("onboarding-privacy-policy")
-                }
+                if step == 1 && !typeSize.isAccessibilitySize { consentDetails }
                 Button(step == 0 ? "Continue" : "Agree and continue") { advance() }
-                    .font(.system(.headline, design: .rounded)).frame(maxWidth: .infinity).padding(.vertical, 19)
+                    .font(.system(.headline, design: .rounded)).multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity).padding(.vertical, 19)
                     .background(MuralColor.orange, in: Capsule())
                     .accessibilityIdentifier("onboarding-continue")
-                Text(step == 0 ? "We’ll find your pace through conversation." : "You can change both languages in Settings.")
-                    .font(.caption).foregroundStyle(MuralColor.secondary).multilineTextAlignment(.center)
+                if !typeSize.isAccessibilitySize {
+                    Text(step == 0 ? "We’ll find your pace through conversation." : "You can change both languages in Settings.")
+                        .font(.caption).foregroundStyle(MuralColor.secondary).multilineTextAlignment(.center)
+                }
             }.padding(.horizontal, 26).padding(.top, 16).padding(.bottom, 16)
-                .background(MuralColor.cream.opacity(0.94))
+                .background(MuralColor.cream)
         }
         .background(OnboardingBackground())
         .foregroundStyle(MuralColor.ink).tint(MuralColor.ink)
@@ -92,6 +90,17 @@ struct OnboardingView: View {
                     withAnimation(.easeInOut(duration: 0.6)) { greetingIndex = (greetingIndex + 1) % LanguageRegistry.all.count }
                 }
             }
+        }
+    }
+
+    private var consentDetails: some View {
+        VStack(spacing: 12) {
+            Text(AIProcessingConsent.summary)
+                .font(.footnote).foregroundStyle(MuralColor.secondary).multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("onboarding-ai-consent")
+            Link("Privacy policy", destination: URL(string: "https://mural.chat/privacy/")!)
+                .font(.footnote).underline().accessibilityIdentifier("onboarding-privacy-policy")
         }
     }
 
@@ -139,6 +148,9 @@ struct OnboardingView: View {
                 .accessibilityIdentifier("onboarding-meaning-picker")
             VStack(spacing: 8) {
                 Text(target.greeting).font(.system(.title2, design: .rounded, weight: .medium))
+                if target.id == "zh", let reading = MandarinPinyin.reading(target.greeting) {
+                    Text(reading).font(.callout).foregroundStyle(MuralColor.secondary)
+                }
                 Text(MeaningLanguages.greeting(in: meaningLanguage)).font(.body).foregroundStyle(MuralColor.secondary)
                     .accessibilityIdentifier("onboarding-meaning-example")
                 Text("Turn meanings on whenever you need a hand.").font(.caption).foregroundStyle(MuralColor.secondary).padding(.top, 8)
@@ -151,6 +163,7 @@ struct OnboardingView: View {
             if !hasChosenMeaning && meaningLanguage == target.name {
                 let preferredNames = Locale.preferredLanguages.map { identifier in
                     let code = Locale(identifier: identifier).language.languageCode?.identifier ?? identifier
+                    if code == "zh" { return "Chinese (Simplified)" }
                     return LanguageRegistry.module(for: code)?.name ?? Locale(identifier: "en").localizedString(forLanguageCode: code)?.capitalized ?? ""
                 }
                 meaningLanguage = preferredNames.first { MeaningLanguages.all.contains($0) && $0 != target.name }

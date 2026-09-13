@@ -49,6 +49,10 @@ extension AudioVerification {
             guard LanguageRegistry.module(for: id) != nil else { return }
             coordinator.selectLanguage(id)
         }
+        if ProcessInfo.processInfo.arguments.contains("--verify-language-flow") {
+            await verifyLanguageFlow(coordinator)
+            return
+        }
         if ProcessInfo.processInfo.arguments.contains("--verify-meaning") {
             await verifyMeaning(coordinator)
             return

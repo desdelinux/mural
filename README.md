@@ -13,6 +13,17 @@ Mural is a native iPhone app for learning through conversation. Speak to a warm,
 
 Built with SwiftUI, Liquid Glass and local SwiftData storage. This version connects directly to OpenAI using your own API key. It needs an internet connection, but no Mural account or running Mac.
 
+## Android
+
+A native Android client is available in [`android/`](android/README.md), with voice and written conversation, the same eight language modules, local learning records and iPhone-compatible JSON backups. Its interface is English, and Spanish on a phone set to Spanish. It runs on Android 8.0 or later and uses your own OpenAI API key stored with Android Keystore. The iPhone client remains available below.
+
+See the [Android installation/build guide](docs/run-on-android.md) and [Android verification record](verification/android-validation.md). Build a personal-install APK with Java 17 and Android SDK 35:
+
+```sh
+cd android
+./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+```
+
 ## Get started
 
 You need a Mac with Xcode 26 or later, an iPhone running iOS 26.1 or later, an Apple Account, and an OpenAI API project with billing and access to GPT-Live-1 and GPT-5.6 Luna. A ChatGPT subscription does not provide API credit.
@@ -70,7 +81,9 @@ A free Personal Team can run the app on your own phone; TestFlight and App Store
 - **A fresh start:** the Talk screen returns to its greeting 15 seconds after a conversation ends. Tap **New conversation** to reset immediately. Your saved conversations and learning remain.
 - **Local records:** export or import a JSON learning backup, delete a conversation, or delete all learning data from Settings.
 
-The modules teach Norwegian Bokmål with an Eastern Norwegian voice target, Spanish from Spain, international English and French from France. Voice accent and teaching guidance are model instructions; fluent-speaker review is still needed before making pronunciation or learning-effectiveness claims.
+The modules teach Norwegian Bokmål with an Eastern Norwegian voice target, Spanish from Spain, international English, French from France, German from Germany, Italian from Italy, Brazilian Portuguese and Standard Mandarin with Simplified Chinese. Each language has its own conversation themes, teaching guidance and progress. Valid regional alternatives are accepted.
+
+Mandarin includes optional pinyin in Talk, transcripts and word details. Chinese word lookup uses word boundaries, and the original characters remain available for copying from transcripts. Pinyin uses system dictionary readings; names, ambiguous words and tone changes in connected speech still need listening checks. Voice accent and teaching guidance are model instructions, and fluent-speaker review is still needed before making pronunciation or learning-effectiveness claims.
 
 ## Privacy and API costs
 
@@ -102,12 +115,13 @@ xcodebuild -project Mural.xcodeproj -scheme Mural \
 
 For UI tests, create or select an iPhone 17 simulator in Xcode, then run **Product → Test**. The tests use in-memory fixtures and do not require an API key. More commands and preview options are in [the build guide](docs/build-and-test.md).
 
-On 12 September 2026, the English, French, onboarding and AI-consent build passed **41 core tests and 11 native UI tests**. This covers language-specific progress, the two welcome screens, consent for existing users, secure key entry and the conversation controls. Earlier iPhone checks verified Spanish speech, Meaning during and after a conversation, reset, retained history and audio cleanup; those live results apply to the earlier tested builds. [Verification record](verification/validation.md)
+On 13 September 2026, the eight-language build passed **70 core tests and 20 native UI tests**, including Mandarin pinyin, all four new onboarding choices and the largest accessibility text size. **79 backend tests** passed with an isolated PostgreSQL database and no skips. German, Italian, Brazilian Portuguese and Mandarin each passed a live iPhone check using synthetic typed replies and real voice output, meanings and word lookup. These checks do not establish human speech-recognition, pronunciation or correction quality. [Verification record](verification/validation.md)
 
 ## Code map
 
 | Directory | Contents |
 | --- | --- |
+| `android/` | Native Kotlin/Compose Android client and tests |
 | `App/` | SwiftUI views, SwiftData storage, Keychain, WebRTC transport and API coordination |
 | `Core/` | Language modules, teaching policy, transcripts, vocabulary evidence and recall projection |
 | `Tests/` | Core learning and translation tests |
