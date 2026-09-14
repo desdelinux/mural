@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Probe realtime voice through a ChatGPT subscription session.
+"""Probe voice and text requests through a ChatGPT subscription session.
 
 Uses the ChatGPT sign-in session that Codex CLI stores on this machine. The
 file is only read; tokens are never refreshed here, because refreshing would
@@ -10,6 +10,8 @@ Subcommands:
   create   Create calls with a static SDP offer (no media) for several shapes.
   call     Run a full WebRTC call. Requires `pip install aiortc numpy`.
   clip     Cut the first spoken seconds of a recorded reply into a mic WAV.
+  models   List the models the plan can use for text.
+  text     Send Responses requests shaped like Mural's text helpers.
 """
 import argparse
 import asyncio
@@ -326,6 +328,88 @@ def command_call(args):
     asyncio.run(run())
 
 
+CLIENT_VERSION = "0.154.0"
+ASSESSMENT_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["outcome", "words"], "properties": {
+    "outcome": {"type": "string", "enum": ["progress", "steady", "struggle"]},
+    "words": {"type": "array", "maxItems": 3, "items": {"type": "object", "additionalProperties": False,
+              "required": ["lemma", "meaning"], "properties": {"lemma": {"type": "string"}, "meaning": {"type": "string"}}}}}}
+
+
+def command_models(args):
+    headers = request_headers(args)
+    headers.pop("Content-Type")
+    status, _, text = http(f"{BACKEND}codex/models?client_version={CLIENT_VERSION}", headers)
+    if status != 200:
+        print(json.dumps({"status": status, "body": text[:300]}))
+        return
+    for model in json.loads(text).get("models", []):
+        print(json.dumps({key: model.get(key) for key in ("slug", "display_name", "visibility", "supported_in_api",
+                                                          "default_reasoning_level", "supported_reasoning_levels") if key in model}))
+
+
+def stream_response(args, body):
+    headers = request_headers(args)
+    headers["Accept"] = "text/event-stream"
+    request = urllib.request.Request(BACKEND + "codex/responses", data=json.dumps(body).encode(), method="POST", headers=headers)
+    started = time.monotonic()
+    try:
+        response = urllib.request.urlopen(request, timeout=120)
+    except urllib.error.HTTPError as error:
+        return {"status": error.code, "error": error.read(600).decode("utf-8", "replace")}
+    kinds, final, items, raw = [], None, [], response.read(8_000_000).decode("utf-8", "replace")
+    for block in raw.split("\n\n"):
+        data = "".join(line[5:].strip() for line in block.splitlines() if line.startswith("data:"))
+        if not data or data == "[DONE]":
+            continue
+        try:
+            event = json.loads(data)
+        except ValueError:
+            continue
+        kinds.append(event.get("type"))
+        if event.get("type") == "response.output_item.done":
+            items.append(event.get("item") or {})
+        if event.get("type") in ("response.completed", "response.failed", "response.incomplete"):
+            final = event.get("response")
+    if final is None:
+        return {"status": response.status, "events": sorted(set(kinds)), "body_head": raw[:300]}
+    text, citations, searches = [], 0, 0
+    final_items = len(final.get("output") or [])
+    for item in final.get("output") or items:
+        searches += item.get("type") == "web_search_call"
+        for part in item.get("content") or []:
+            if part.get("type") == "output_text":
+                text.append(part.get("text", ""))
+                citations += sum(1 for a in part.get("annotations") or [] if a.get("type") == "url_citation")
+    return {"status": response.status, "seconds": round(time.monotonic() - started, 1), "final": final.get("status"),
+            "model": final.get("model"), "output_in_completed": final_items, "output_from_events": len(items),
+            "events": sorted({k for k in kinds if k}), "text": "".join(text)[:300],
+            "citations": citations, "searches": searches, "error": final.get("error"),
+            "usage": {key: (final.get("usage") or {}).get(key) for key in ("input_tokens", "output_tokens", "total_tokens")}}
+
+
+def command_text(args):
+    """Every accepted request counts against the plan's Codex usage."""
+    def body(**extra):
+        request = {"model": args.model, "instructions": "You help a Spanish learner. Reply briefly.",
+                   "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Traduce: el metro es gratis hoy."}]}],
+                   "tools": [], "tool_choice": "auto", "parallel_tool_calls": False, "store": False, "stream": True, "include": []}
+        request.update(extra)
+        return request
+    probes = {
+        "baseline": body(),
+        "string-input": body(input=[{"role": "user", "content": "Traduce: el metro es gratis hoy."}]),
+        "reasoning-low": body(reasoning={"effort": "low"}),
+        "json-schema": body(instructions="Assess the learner's sentence and return JSON only.",
+                            text={"format": {"type": "json_schema", "name": "mural_result", "strict": True, "schema": ASSESSMENT_SCHEMA}}),
+        "web-search": body(instructions="Answer with one current, cited fact.", tools=[{"type": "web_search"}],
+                           input=[{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "¿Qué noticia importante hay hoy en España?"}]}]),
+        "max-output-tokens": body(max_output_tokens=1400),
+        "no-stream": body(stream=False),
+    }
+    for name in args.only or probes:
+        print(json.dumps({"probe": name, **stream_response(args, probes[name])}, ensure_ascii=False))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--auth-file", default=default_auth_file())
@@ -345,8 +429,13 @@ def main():
     clip.add_argument("source")
     clip.add_argument("target")
     clip.add_argument("--seconds", type=float, default=7)
+    commands.add_parser("models")
+    text = commands.add_parser("text")
+    text.add_argument("--model", required=True)
+    text.add_argument("--only", nargs="*")
     args = parser.parse_args()
-    {"usage": command_usage, "create": command_create, "call": command_call, "clip": command_clip}[args.command](args)
+    {"usage": command_usage, "create": command_create, "call": command_call, "clip": command_clip,
+     "models": command_models, "text": command_text}[args.command](args)
 
 
 if __name__ == "__main__":

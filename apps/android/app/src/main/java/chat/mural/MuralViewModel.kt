@@ -37,7 +37,7 @@ internal fun errorMessageRes(e: Throwable): Int = when (e) {
     is ChatGPTFailure.SecureStorage -> R.string.chatgpt_error_storage
     is ChatGPTFailure.InvalidResponse -> R.string.error_incomplete_response
     is ChatGPTFailure.Http -> when (e.status) {
-        403 -> R.string.chatgpt_error_voice_denied
+        403 -> R.string.chatgpt_error_forbidden
         429 -> R.string.chatgpt_error_limit
         else -> R.string.chatgpt_error_http
     }
@@ -89,7 +89,12 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
     private val credentials = CredentialStore(application)
     private val api = APIClient(credentials)
     private val chatGPTStore = ChatGPTAuthStore(application)
-    private val chatGPTVoice = ChatGPTVoiceClient(ChatGPTAccount(chatGPTStore))
+    private val chatGPTAccount = ChatGPTAccount(chatGPTStore)
+    private val chatGPTVoice = ChatGPTVoiceClient(chatGPTAccount)
+    private val chatGPTText = ChatGPTTeachingClient(chatGPTAccount)
+    /** Local helpers follow the selected provider; hosted sessions keep their own lease. */
+    private val localHelpersReady get() =
+        if (conversationProvider == ConversationProvider.CHATGPT_SUBSCRIPTION) chatGPTSignedIn else hasKey
     private val chatGPTLogin = ChatGPTLoginFlow()
     private var chatGPTPending: ChatGPTLoginFlow.Pending? = null
     private var chatGPTSignInJob: Job? = null
@@ -248,7 +253,7 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
             val current = archive.sessions.firstOrNull { it.id == snapshot.id }
             val ticket = finalAssessmentTickets.firstOrNull { it.matches(snapshot, passage) }
             if (snapshot.id in hostedSessionIDs) false
-            else if (!storageReady || !hasKey || archive.preferences.aiConsentVersion != 1 || current == null ||
+            else if (!storageReady || !localHelpersReady || archive.preferences.aiConsentVersion != 1 || current == null ||
                 ticket == null || !FinalAssessmentRecovery.canAttempt(ticket, current, nowSeconds())) false
             else {
                 finalAssessmentTickets = finalAssessmentTickets.map {
@@ -268,7 +273,7 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun recoverFinalAssessments() {
-        if (!storageReady || !hasKey || archive.preferences.aiConsentVersion != 1) return
+        if (!storageReady || !localHelpersReady || archive.preferences.aiConsentVersion != 1) return
         val remaining = FinalAssessmentRecovery.MAX_RECOVERED_PER_LAUNCH - recoveredAssessmentIDs.size
         if (remaining <= 0) return
         FinalAssessmentRecovery.recover(archive.sessions, finalAssessmentTickets, nowSeconds())
@@ -458,7 +463,8 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
             return hostedBindings.respond(localID, purpose, logicalID, instructions, input, schema, search)
         }
         if (localID == null && conversationProvider == ConversationProvider.HOSTED_MINUTES) throw HostedFailure.Unavailable
-        return api.respond(instructions, input, schema, search, purpose)
+        val client: TeachingClient = if (conversationProvider == ConversationProvider.CHATGPT_SUBSCRIPTION) chatGPTText else api
+        return client.respond(instructions, input, schema, search, purpose)
     }
     private fun helperContext(snapshot: SessionRecord, passage: Passage? = null): String =
         if (snapshot.id in hostedSessionIDs) ConversationHistory.helperContext(snapshot, passage)

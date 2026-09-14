@@ -1,8 +1,8 @@
-# Voice through a ChatGPT subscription
+# Mural through a ChatGPT subscription
 
-Status: voice works through a ChatGPT Plus subscription, on a different model and event protocol than Mural uses today. Measured on 2026-09-14 with a Plus account and Codex CLI 0.154.0's sign-in session.
+Status: voice and text helpers both work through a ChatGPT Plus subscription. Voice runs on a different model and event protocol than Mural uses with an API key; text helpers keep the same model. Measured on 2026-09-14 with a Plus account and Codex CLI 0.154.0's sign-in session. The Android app has an experimental provider built on these findings.
 
-This is research for a personal, experimental option. OpenAI has not published terms that allow third-party apps to use the ChatGPT sign-in of Codex CLI. The backend below is undocumented and can change or close without notice. Nothing here is used by the shipped apps.
+This is research for a personal, experimental option. OpenAI has not published terms that allow third-party apps to use the ChatGPT sign-in of Codex CLI. The backend below is undocumented and can change or close without notice.
 
 ## Why
 
@@ -76,13 +76,34 @@ Every connected call cost about two points of the five-hour window, whatever its
 
 At this rate a Plus plan allows roughly 50 voice conversations in five hours. The weekly window is shared with all Codex use on the same account.
 
+## Text helpers
+
+`POST https://chatgpt.com/backend-api/codex/responses` takes the Responses API body with the same headers as call creation plus `Accept: text/event-stream`. `GET codex/models?client_version=…` lists `gpt-5.6-luna`, the model Mural's helpers already use with an API key.
+
+| Request with `gpt-5.6-luna` | Result |
+| --- | --- |
+| Message input, `store: false`, `stream: true` | Works, about 1.5 s |
+| Plain string content | Works |
+| `reasoning.effort: low` | Works |
+| Strict `json_schema` text format | Works and returns schema-valid JSON |
+| `web_search` tool | Works, with `url_citation` annotations |
+| `max_output_tokens` | `400` unsupported parameter |
+| `stream: false` | `400` stream must be true |
+
+The `response.completed` event arrives with an empty `output`. The items come only in `response.output_item.done` events, so a client rebuilds the final response from them before reading text, refusals, citations and web search calls.
+
+Ten text requests, including two web searches, did not move the five-hour window.
+
 ## What it means for Mural
 
-Voice through the subscription is feasible on Android without a Mural server. It needs:
+A learner can use Mural on Android with only a ChatGPT subscription, without a Mural server. The experimental provider needs:
 
 1. A ChatGPT sign-in on the device, with the tokens stored like the API key.
 2. A voice provider that creates the call with the JSON body above.
 3. An adapter between Realtime events and the GPT-Live events the transport and view model already handle, with delegation expressed as a function tool.
+4. A text client that streams helper requests and rebuilds the final response from output items.
+
+On the API 35 emulator, the app's own voice client and adapter opened a call, spoke the greeting with a subtitle and closed with usage.
 
 If the GPT-Live path opens for the account later, the adapter is unnecessary and the existing transport can be reused.
 
@@ -98,10 +119,12 @@ If the GPT-Live path opens for the account later, the adapter is unnecessary and
 The `call` subcommand needs `aiortc` and `numpy`. Output goes to `~/.cache/mural/chatgpt-voice/`. Every connected call counts against the plan.
 
 ```sh
-python3 scripts/research/chatgpt_voice_probe.py usage
-python3 scripts/research/chatgpt_voice_probe.py create
-python3 scripts/research/chatgpt_voice_probe.py call --scenario delegate
-python3 scripts/research/chatgpt_voice_probe.py call --scenario story --seconds 120
-python3 scripts/research/chatgpt_voice_probe.py clip ~/.cache/mural/chatgpt-voice/story/reply.wav /tmp/mic.wav
-python3 scripts/research/chatgpt_voice_probe.py call --scenario listen --mic-wav /tmp/mic.wav --seconds 35
+python3 scripts/research/chatgpt_subscription_probe.py usage
+python3 scripts/research/chatgpt_subscription_probe.py create
+python3 scripts/research/chatgpt_subscription_probe.py call --scenario delegate
+python3 scripts/research/chatgpt_subscription_probe.py call --scenario story --seconds 120
+python3 scripts/research/chatgpt_subscription_probe.py clip ~/.cache/mural/chatgpt-voice/story/reply.wav /tmp/mic.wav
+python3 scripts/research/chatgpt_subscription_probe.py call --scenario listen --mic-wav /tmp/mic.wav --seconds 35
+python3 scripts/research/chatgpt_subscription_probe.py models
+python3 scripts/research/chatgpt_subscription_probe.py text --model gpt-5.6-luna
 ```

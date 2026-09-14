@@ -1,11 +1,23 @@
 package chat.mural.network
 
+import java.util.UUID
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
+import okhttp3.Request
+
+/** Headers the ChatGPT backend expects on every plan request. */
+internal fun Request.Builder.chatGPTSession(session: ChatGPTSession): Request.Builder {
+    val sessionID = UUID.randomUUID().toString()
+    return header("Authorization", "Bearer ${session.accessToken}")
+        .header("chatgpt-account-id", session.accountID)
+        .header("originator", ChatGPTOAuth.ORIGINATOR)
+        .header("session-id", sessionID)
+        .header("x-session-id", sessionID)
+}
 
 interface ChatGPTSessionStorage {
     suspend fun read(): ChatGPTSession?

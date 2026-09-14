@@ -276,7 +276,7 @@ private fun ChatGPTSubscriptionRows(vm: MuralViewModel, onSignOut: () -> Unit) {
             val labels = mapOf(ConversationProvider.PERSONAL_KEY to stringResource(R.string.account_personal_key),
                 ConversationProvider.HOSTED_MINUTES to stringResource(R.string.account_mural_minutes),
                 ConversationProvider.CHATGPT_SUBSCRIPTION to stringResource(R.string.chatgpt_provider_subscription))
-            SettingsChoiceRow(stringResource(R.string.chatgpt_voice_uses), labels.getValue(vm.conversationProvider), vm.conversationProvider.name,
+            SettingsChoiceRow(stringResource(R.string.chatgpt_conversations_use), labels.getValue(vm.conversationProvider), vm.conversationProvider.name,
                 listOf(ConversationProvider.PERSONAL_KEY, ConversationProvider.CHATGPT_SUBSCRIPTION).map { it.name to labels.getValue(it) },
                 "chatgpt-voice-provider", !vm.isRunning) { vm.selectConversationProvider(ConversationProvider.valueOf(it)) }
             SettingsDivider()

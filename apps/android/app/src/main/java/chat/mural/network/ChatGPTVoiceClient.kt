@@ -1,6 +1,5 @@
 package chat.mural.network
 
-import java.util.UUID
 import kotlinx.serialization.json.*
 import okhttp3.HttpUrl
 import okhttp3.MediaType.Companion.toMediaType
@@ -39,14 +38,9 @@ class ChatGPTVoiceClient internal constructor(
                 putJsonObject("audio") { putJsonObject("output") { put("voice", RealtimeDialect.VOICE) } }
             }
         }
-        val sessionID = UUID.randomUUID().toString()
         return client.fetch(Request.Builder()
             .url(backend.newBuilder().addPathSegments("codex/realtime/calls").build())
-            .header("Authorization", "Bearer ${session.accessToken}")
-            .header("chatgpt-account-id", session.accountID)
-            .header("originator", ChatGPTOAuth.ORIGINATOR)
-            .header("session-id", sessionID)
-            .header("x-session-id", sessionID)
+            .chatGPTSession(session)
             .post(body.toString().toRequestBody(JSON))
             .build(), MAX_SDP_BYTES)
     }
