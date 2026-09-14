@@ -46,6 +46,8 @@ The microphone works only in the foreground. Ending the conversation, losing aud
 
 The repository protocol is unchanged: OpenAI `POST /v1/live/sessions` with `gpt-live-1`, voice `marin` and the `oai-events` channel, and helper operations through `POST /v1/responses` with `gpt-5.6-luna`. The key is entered on the device, never in code. There is no shared key, no required Mural server and no paid call in automated tests.
 
+Android also has an experimental provider, not present on iPhone, that uses the owner's ChatGPT subscription through the sign-in Codex CLI uses. Voice calls go to the ChatGPT backend's `realtime/calls` with `gpt-realtime`, and `RealtimeDialect` translates its Realtime events into the session events above, with delegation as a function tool. Text helpers stream `gpt-5.6-luna` from the backend's Responses endpoint. OpenAI has not approved this sign-in for other apps, so it stays under Settings > Advanced and may stop working. See [the research notes](../research/chatgpt-subscription.md).
+
 ## Keeping both clients in sync
 
 Language content is generated from the Swift modules by `scripts/export_android_content.py`. `scripts/check_cross_platform.py` compares teaching prompts, learning constants and archive fields between `apps/ios/Core/` and `apps/android/app/src/main/java/chat/mural/core/`, and `shared/fixtures/cross-platform/` holds an archive that both `swift test` and the Gradle tests decode, project and re-encode. See [the language architecture](../language-architecture.md).
