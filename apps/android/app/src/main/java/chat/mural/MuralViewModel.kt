@@ -616,8 +616,9 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun chatGPTBrowserOpened() { chatGPTAuthorizeUrl = null }
     fun cancelChatGPTSignIn() {
-        chatGPTPending?.let(chatGPTLogin::cancel)
+        // Cancel first so the closed socket's exception cannot surface as a sign-in failure.
         chatGPTSignInJob?.cancel()
+        chatGPTPending?.let(chatGPTLogin::cancel)
     }
     fun chatGPTBrowserUnavailable() {
         cancelChatGPTSignIn()
