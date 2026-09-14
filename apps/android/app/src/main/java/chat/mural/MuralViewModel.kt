@@ -31,12 +31,23 @@ internal fun errorMessageRes(e: Throwable): Int = when (e) {
     is CredentialStore.CredentialException.Invalid -> R.string.error_key_invalid
     is CredentialStore.CredentialException.Save -> R.string.error_key_save
     is CredentialStore.CredentialException.Remove -> R.string.error_key_remove
+    is ChatGPTFailure.SignInRequired -> R.string.chatgpt_error_sign_in
+    is ChatGPTFailure.Denied -> R.string.chatgpt_error_denied
+    is ChatGPTFailure.PortUnavailable -> R.string.chatgpt_error_port
+    is ChatGPTFailure.SecureStorage -> R.string.chatgpt_error_storage
+    is ChatGPTFailure.InvalidResponse -> R.string.error_incomplete_response
+    is ChatGPTFailure.Http -> when (e.status) {
+        403 -> R.string.chatgpt_error_voice_denied
+        429 -> R.string.chatgpt_error_limit
+        else -> R.string.chatgpt_error_http
+    }
     else -> 0
 }
 
-/** Whether the failure means the learner needs to add or fix their OpenAI key in Settings. */
+/** Whether the failure means the learner needs to add or fix their OpenAI key or ChatGPT sign-in in Settings. */
 internal fun errorNeedsKeySetup(e: Throwable): Boolean =
-    e is APIClient.APIException.MissingKey || (e is APIClient.APIException.Http && e.status == 401)
+    e is APIClient.APIException.MissingKey || (e is APIClient.APIException.Http && e.status == 401) ||
+        e is ChatGPTFailure.SignInRequired
 
 /** Imported partial conversations are history, not local sessions awaiting cloud recovery. */
 internal fun prepareImportedArchive(data: String, importedAt: Double = nowSeconds()): Archive =
@@ -77,6 +88,16 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = LearningRepository(application)
     private val credentials = CredentialStore(application)
     private val api = APIClient(credentials)
+    private val chatGPTStore = ChatGPTAuthStore(application)
+    private val chatGPTVoice = ChatGPTVoiceClient(ChatGPTAccount(chatGPTStore))
+    private val chatGPTLogin = ChatGPTLoginFlow()
+    private var chatGPTPending: ChatGPTLoginFlow.Pending? = null
+    private var chatGPTSignInJob: Job? = null
+    var chatGPTSignedIn by mutableStateOf(false); private set
+    var chatGPTPlan by mutableStateOf<String?>(null); private set
+    var chatGPTSigningIn by mutableStateOf(false); private set
+    /** Set once per sign-in for the UI to open in a browser; the ViewModel never holds an Activity. */
+    var chatGPTAuthorizeUrl by mutableStateOf<String?>(null); private set
     private val transport = LiveTransport(application, viewModelScope)
     private val providerStore = ConversationProviderStore(application)
     private val hostedConfiguration = HostedConfiguration.parse(BuildConfig.MANAGED_API_ORIGIN)
@@ -174,6 +195,8 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
                 conversationProvider = providers.selection
                 finalAssessmentTickets = ConversationProviderPolicy.recoveryTickets(loaded.first.finalAssessments, hostedSessionIDs)
                 hasKey = loaded.second
+                val chatGPT = try { chatGPTStore.read() } catch (cancelled: CancellationException) { throw cancelled } catch (_: Exception) { null }
+                chatGPTSignedIn = chatGPT != null; chatGPTPlan = chatGPT?.planType
                 storageReady = true
                 recoverFinalAssessments()
                 refreshHostedReadiness()
@@ -286,6 +309,7 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
         val res = errorMessageRes(e)
         return when {
             res == R.string.error_http_generic && e is APIClient.APIException.Http -> app.getString(res, e.status)
+            res == R.string.chatgpt_error_http && e is ChatGPTFailure.Http -> app.getString(res, e.status)
             e is HostedFailure -> hostedMessage(e)
             res != 0 -> app.getString(res)
             e is LiveTransport.TransportException -> e.message ?: app.getString(fallback)
@@ -306,6 +330,9 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
         val currentHosted = session?.id in hostedSessionIDs
         if (!currentHosted && conversationProvider == ConversationProvider.PERSONAL_KEY && !hasKey) {
             presentError(getApplication<Application>().getString(R.string.error_missing_key), needsKeySetup = true); return false
+        }
+        if (!currentHosted && conversationProvider == ConversationProvider.CHATGPT_SUBSCRIPTION && !chatGPTSignedIn) {
+            presentError(getApplication<Application>().getString(R.string.chatgpt_error_sign_in), needsKeySetup = true); return false
         }
         return true
     }
@@ -557,6 +584,51 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
         catch (e: Exception) { presentError(e, R.string.error_key_delete_failed) }
         finally { hasKey = credentials.hasKey }
     }
+    /** The listener binds on the IO dispatcher; the UI opens the returned URL and clears it. */
+    fun signInWithChatGPT() {
+        if (isRunning || !storageReady || chatGPTSigningIn) return
+        chatGPTSigningIn = true
+        chatGPTSignInJob = viewModelScope.launch {
+            var pending: ChatGPTLoginFlow.Pending? = null
+            try {
+                pending = withContext(Dispatchers.IO) { chatGPTLogin.begin() }
+                chatGPTPending = pending
+                chatGPTAuthorizeUrl = pending.authorizeUrl.toString()
+                val signedIn = chatGPTLogin.await(pending)
+                chatGPTStore.save(signedIn)
+                chatGPTSignedIn = true; chatGPTPlan = signedIn.planType
+                selectConversationProvider(ConversationProvider.CHATGPT_SUBSCRIPTION)
+                notice = getApplication<Application>().getString(R.string.chatgpt_notice_signed_in)
+            } catch (_: CancellationException) {
+            } catch (e: Exception) {
+                presentError(e, R.string.chatgpt_error_sign_in_failed)
+            } finally {
+                pending?.let(chatGPTLogin::cancel)
+                chatGPTPending = null; chatGPTAuthorizeUrl = null; chatGPTSigningIn = false
+            }
+        }
+    }
+    fun chatGPTBrowserOpened() { chatGPTAuthorizeUrl = null }
+    fun cancelChatGPTSignIn() {
+        chatGPTPending?.let(chatGPTLogin::cancel)
+        chatGPTSignInJob?.cancel()
+    }
+    fun chatGPTBrowserUnavailable() {
+        cancelChatGPTSignIn()
+        presentError(getApplication<Application>().getString(R.string.chatgpt_error_browser))
+    }
+    fun signOutChatGPT() {
+        if (isRunning) return
+        viewModelScope.launch {
+            try { chatGPTStore.clear() }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (e: Exception) { presentError(e, R.string.chatgpt_error_storage) }
+            finally {
+                val remaining = try { chatGPTStore.read() } catch (cancelled: CancellationException) { throw cancelled } catch (_: Exception) { null }
+                chatGPTSignedIn = remaining != null; chatGPTPlan = remaining?.planType
+            }
+        }
+    }
     fun updatePreferences(preferences: Preferences) {
         if (isRunning || !storageReady) return
         if (LanguageRegistry.get(preferences.learningLanguageID) == null || preferences.meaningLanguage !in MeaningLanguages.all || preferences.sessionMinutes !in 1..60) return
@@ -628,10 +700,12 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
             presentError(getApplication<Application>().getString(R.string.hosted_checking_previous))
             reconcileHostedSessions(); return
         }
-        if (!ConversationProviderPolicy.canStart(choice, hasKey, hostedReadiness)) {
-            if (choice == ConversationProvider.HOSTED_MINUTES) {
-                showMinuteAccess = true; refreshHostedReadiness()
-            } else presentError(getApplication<Application>().getString(R.string.error_missing_key), true)
+        if (!ConversationProviderPolicy.canStart(choice, hasKey, hostedReadiness, chatGPTSignedIn)) {
+            when (choice) {
+                ConversationProvider.HOSTED_MINUTES -> { showMinuteAccess = true; refreshHostedReadiness() }
+                ConversationProvider.CHATGPT_SUBSCRIPTION -> presentError(getApplication<Application>().getString(R.string.chatgpt_error_sign_in), true)
+                ConversationProvider.PERSONAL_KEY -> presentError(getApplication<Application>().getString(R.string.error_missing_key), true)
+            }
             return
         }
         newSession(true); state = "connecting"
@@ -642,7 +716,8 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
         if (choice == ConversationProvider.HOSTED_MINUTES) accountChangeBlocked = true
         connectionJob = viewModelScope.launch {
             try {
-                val provider: LiveSessionProvider = if (choice == ConversationProvider.PERSONAL_KEY) api else {
+                val provider: LiveSessionProvider = if (choice == ConversationProvider.PERSONAL_KEY) api
+                else if (choice == ConversationProvider.CHATGPT_SUBSCRIPTION) chatGPTVoice else {
                     val owner = requireHostedOwner()
                     if (selectedAccount.busy || owner.accountID != hostedReadiness.accountID) throw HostedFailure.SignInRequired
                     val hosted = hostedClient(owner.accountID)

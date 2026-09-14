@@ -34,6 +34,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -58,6 +59,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogWindowProvider
 import chat.mural.MuralViewModel
 import chat.mural.R
+import chat.mural.core.ConversationProvider
 import chat.mural.core.LanguageRegistry
 import chat.mural.core.MeaningLanguages
 import chat.mural.core.Passage
@@ -71,6 +73,7 @@ fun SettingsScreen(vm: MuralViewModel, onExport: () -> Unit, onImport: () -> Uni
     var advanced by rememberSaveable { mutableStateOf(false) }
     var keyDialog by rememberSaveable { mutableStateOf(false) }
     var deleteKey by rememberSaveable { mutableStateOf(false) }
+    var signOutChatGPT by rememberSaveable { mutableStateOf(false) }
     var deleteAll by rememberSaveable { mutableStateOf(false) }
     var permissionDetails by rememberSaveable { mutableStateOf(false) }
     var revokeConsent by rememberSaveable { mutableStateOf(false) }
@@ -142,6 +145,8 @@ fun SettingsScreen(vm: MuralViewModel, onExport: () -> Unit, onImport: () -> Uni
                             }
                             Text(stringResource(R.string.settings_key_owner_footer), style = MaterialTheme.typography.bodySmall,
                                 color = MuralColors.Secondary, modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp))
+                            SettingsDivider()
+                            ChatGPTSubscriptionRows(vm, onSignOut = { signOutChatGPT = true })
                         }
                     }
                 }
@@ -232,6 +237,8 @@ fun SettingsScreen(vm: MuralViewModel, onExport: () -> Unit, onImport: () -> Uni
     if (deleteKey) ConfirmDialog(stringResource(R.string.settings_delete_key_confirm_title), stringResource(R.string.settings_delete_key_confirm_message), stringResource(R.string.common_delete), {
         vm.deleteKey(); deleteKey = false
     }, { deleteKey = false })
+    if (signOutChatGPT) ConfirmDialog(stringResource(R.string.chatgpt_sign_out_confirm_title), stringResource(R.string.chatgpt_sign_out_confirm_message),
+        stringResource(R.string.chatgpt_sign_out), { vm.signOutChatGPT(); signOutChatGPT = false }, { signOutChatGPT = false })
     if (deleteAll) ConfirmDialog(stringResource(R.string.settings_delete_all_confirm_title), stringResource(R.string.settings_delete_all_confirm_message), stringResource(R.string.settings_delete_all_confirm_button), {
         vm.deleteLearningData(); deleteAll = false
     }, { deleteAll = false })
@@ -243,6 +250,44 @@ fun SettingsScreen(vm: MuralViewModel, onExport: () -> Unit, onImport: () -> Uni
         vm.deleteSession(session.id); deleteSession = null
     }, { deleteSession = null }) }
     transcript?.let { TranscriptDialog(vm, it, onDismiss = { transcript = null }) }
+}
+
+@Composable
+private fun ChatGPTSubscriptionRows(vm: MuralViewModel, onSignOut: () -> Unit) {
+    val uriHandler = LocalUriHandler.current
+    val authorizeUrl = vm.chatGPTAuthorizeUrl
+    LaunchedEffect(authorizeUrl) {
+        if (authorizeUrl == null) return@LaunchedEffect
+        try { uriHandler.openUri(authorizeUrl); vm.chatGPTBrowserOpened() }
+        catch (_: Exception) { vm.chatGPTBrowserUnavailable() }
+    }
+    when {
+        vm.chatGPTSigningIn -> {
+            Text(stringResource(R.string.chatgpt_waiting_browser), style = MaterialTheme.typography.bodySmall,
+                color = MuralColors.Secondary, modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp))
+            SettingsRow(stringResource(R.string.common_cancel), tint = MuralColors.Secondary,
+                modifier = Modifier.testTag("chatgpt-cancel-sign-in"), onClick = vm::cancelChatGPTSignIn)
+        }
+        vm.chatGPTSignedIn -> {
+            val plan = vm.chatGPTPlan?.replaceFirstChar { it.uppercase() }
+            Text(if (plan != null) stringResource(R.string.chatgpt_signed_in_plan, plan) else stringResource(R.string.chatgpt_signed_in),
+                style = MaterialTheme.typography.bodySmall, color = MuralColors.Secondary,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp))
+            val labels = mapOf(ConversationProvider.PERSONAL_KEY to stringResource(R.string.account_personal_key),
+                ConversationProvider.HOSTED_MINUTES to stringResource(R.string.account_mural_minutes),
+                ConversationProvider.CHATGPT_SUBSCRIPTION to stringResource(R.string.chatgpt_provider_subscription))
+            SettingsChoiceRow(stringResource(R.string.chatgpt_voice_uses), labels.getValue(vm.conversationProvider), vm.conversationProvider.name,
+                listOf(ConversationProvider.PERSONAL_KEY, ConversationProvider.CHATGPT_SUBSCRIPTION).map { it.name to labels.getValue(it) },
+                "chatgpt-voice-provider", !vm.isRunning) { vm.selectConversationProvider(ConversationProvider.valueOf(it)) }
+            SettingsDivider()
+            SettingsRow(stringResource(R.string.chatgpt_sign_out), enabled = !vm.isRunning, tint = MuralColors.Red,
+                modifier = Modifier.testTag("chatgpt-sign-out"), onClick = onSignOut)
+        }
+        else -> SettingsRow(stringResource(R.string.chatgpt_sign_in), enabled = !vm.isRunning, tint = MuralColors.Secondary,
+            chevron = true, modifier = Modifier.testTag("chatgpt-sign-in"), onClick = vm::signInWithChatGPT)
+    }
+    Text(stringResource(R.string.chatgpt_footer), style = MaterialTheme.typography.bodySmall,
+        color = MuralColors.Secondary, modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp))
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

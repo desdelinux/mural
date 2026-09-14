@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="chatgpt_sign_in">Sign in with ChatGPT (experimental)</string>
+    <string name="chatgpt_waiting_browser">Finish signing in with your browser, then return to Mural.</string>
+    <string name="chatgpt_signed_in">Signed in with ChatGPT.</string>
+    <string name="chatgpt_signed_in_plan">Signed in with ChatGPT (%1$s plan).</string>
+    <string name="chatgpt_voice_uses">Voice conversations use</string>
+    <string name="chatgpt_provider_subscription">ChatGPT subscription</string>
+    <string name="chatgpt_sign_out">Sign out of ChatGPT</string>
+    <string name="chatgpt_sign_out_confirm_title">Sign out of ChatGPT?</string>
+    <string name="chatgpt_sign_out_confirm_message">Voice conversations will need your API key again.</string>
+    <string name="chatgpt_footer">Experimental and for personal use. Mural signs in the way Codex CLI does, which OpenAI has not approved for other apps and may stop at any time. Voice uses gpt-realtime and counts against your plan\'s Codex limits. Subtitles, lookups and progress still use your API key.</string>
+    <string name="chatgpt_notice_signed_in">Signed in. Voice conversations now use your ChatGPT subscription.</string>
+    <string name="chatgpt_error_sign_in">Sign in with ChatGPT in Settings to start a voice conversation.</string>
+    <string name="chatgpt_error_sign_in_failed">ChatGPT sign-in didn\'t finish. Try again.</string>
+    <string name="chatgpt_error_denied">ChatGPT sign-in was cancelled.</string>
+    <string name="chatgpt_error_port">ChatGPT sign-in couldn\'t start because another app is using its port.</string>
+    <string name="chatgpt_error_storage">The ChatGPT sign-in couldn\'t be stored securely on this phone.</string>
+    <string name="chatgpt_error_voice_denied">ChatGPT didn\'t allow a voice conversation for this account.</string>
+    <string name="chatgpt_error_limit">Your ChatGPT plan\'s usage limit was reached. Try again later.</string>
+    <string name="chatgpt_error_http">ChatGPT couldn\'t complete the request (HTTP %1$d). Please try again.</string>
+    <string name="chatgpt_error_browser">No browser is available to sign in with ChatGPT.</string>
+</resources>

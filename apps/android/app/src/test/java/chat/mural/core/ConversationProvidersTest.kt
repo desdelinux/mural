@@ -29,6 +29,14 @@ class ConversationProvidersTest {
             assertFalse(ConversationProviderPolicy.canStart(ConversationProvider.HOSTED_MINUTES, true, invalid))
     }
 
+    @Test fun chatGPTVoiceNeedsItsOwnSignInAndNeverBorrowsAKeyOrMinutes() {
+        val ready = HostedReadiness("owner", 1, true)
+        assertTrue(ConversationProviderPolicy.canStart(ConversationProvider.CHATGPT_SUBSCRIPTION, false, HostedReadiness(), chatGPTSignedIn = true))
+        assertFalse(ConversationProviderPolicy.canStart(ConversationProvider.CHATGPT_SUBSCRIPTION, true, ready, chatGPTSignedIn = false))
+        assertFalse(ConversationProviderPolicy.canStart(ConversationProvider.PERSONAL_KEY, false, ready, chatGPTSignedIn = true))
+        assertFalse(ConversationProviderPolicy.canStart(ConversationProvider.HOSTED_MINUTES, true, HostedReadiness(), chatGPTSignedIn = true))
+    }
+
     @Test fun acknowledgedGuestRecoveryDetachesOnlyThatOwnersLeasesAndCannotReuseThemForMember() = runTest {
         var guestCalls = 0; var memberCalls = 0; var guestCloses = 0
         val controller = HostedConversationBindings(backgroundScope)

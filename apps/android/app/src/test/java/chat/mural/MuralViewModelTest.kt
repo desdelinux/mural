@@ -6,6 +6,7 @@ import chat.mural.core.Fragment
 import chat.mural.core.SessionRecord
 import chat.mural.core.Speaker
 import chat.mural.network.APIClient
+import chat.mural.network.ChatGPTFailure
 import chat.mural.network.CredentialStore
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -64,6 +65,17 @@ class MuralViewModelTest {
         )
         val ids = distinctReasons.map { errorMessageRes(it) }
         assertEquals("distinct reasons must map to distinct resources", ids.size, ids.toSet().size)
+    }
+
+    @Test fun chatGPTReasonsMapToTheirOwnResources() {
+        val reasons = listOf(ChatGPTFailure.SignInRequired, ChatGPTFailure.Denied, ChatGPTFailure.PortUnavailable,
+            ChatGPTFailure.SecureStorage, ChatGPTFailure.Http(403), ChatGPTFailure.Http(429), ChatGPTFailure.Http(500))
+        val ids = reasons.map { errorMessageRes(it) }
+        assertFalse(ids.contains(0))
+        assertEquals(ids.size, ids.toSet().size)
+        assertEquals(errorMessageRes(APIClient.APIException.InvalidResponse), errorMessageRes(ChatGPTFailure.InvalidResponse))
+        assertTrue(errorNeedsKeySetup(ChatGPTFailure.SignInRequired))
+        assertFalse(errorNeedsKeySetup(ChatGPTFailure.Http(403)))
     }
 
     @Test fun unmappedThrowableHasNoResource() {
