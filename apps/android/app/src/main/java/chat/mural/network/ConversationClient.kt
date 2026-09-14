@@ -32,8 +32,19 @@ interface LiveSessionLease {
     suspend fun requestClose()
 }
 
-data class LiveSessionConnection(val sdp: String, val providerSessionID: String?, val lease: LiveSessionLease? = null) {
+data class LiveSessionConnection(val sdp: String, val providerSessionID: String?, val lease: LiveSessionLease? = null,
+    val dialect: LiveEventDialect? = null) {
     override fun toString() = "LiveSessionConnection([redacted])"
+}
+
+/** Provider commands to send and conversation events to deliver, in order. */
+data class DialectStep(val send: List<JsonObject> = emptyList(), val deliver: List<JsonObject> = emptyList())
+
+/** Translates a provider's event protocol to and from the session events the conversation handles.
+ * The transport calls it from one worker, so implementations need no locking. */
+interface LiveEventDialect {
+    fun inbound(event: JsonObject): DialectStep
+    fun outbound(event: JsonObject): DialectStep
 }
 
 /** A create result can arrive after local disposal. Either ordering must still request server cutoff. */

@@ -122,6 +122,7 @@ class LiveTransport(
             val sdp = attempt.peer?.localDescription?.description ?: throw connectionException()
             val result = api.createLiveSession(LiveSessionRequest(sdp, instructions, history, language))
             attempt.ownership.adopt(result.lease)
+            attempt.dialect = result.dialect
             requireCurrent(attempt)
             val answer = result.sdp
             result.providerSessionID?.let { id ->
@@ -156,11 +157,20 @@ class LiveTransport(
         val attempt = activeAttempt ?: return false
         if (!isCurrent(attempt) || !attempt.channelOpen.get()) return false
         audioScope.launch {
-            if (isCurrent(attempt) && !sendNow(attempt, event) && !attempt.closing.get()) {
+            if (isCurrent(attempt) && !dispatch(attempt, event) && !attempt.closing.get()) {
                 fail(attempt, applicationContext.getString(R.string.error_transport_channel_closed))
             }
         }
         return true
+    }
+
+    /** Runs on the audio worker. A provider dialect may send several events or answer locally. */
+    private fun dispatch(attempt: Attempt, event: JsonObject): Boolean {
+        val dialect = attempt.dialect ?: return sendNow(attempt, event)
+        val step = dialect.outbound(event)
+        val sent = step.send.all { sendNow(attempt, it) }
+        step.deliver.forEach { deliver(attempt, it) }
+        return sent
     }
 
     private fun sendNow(attempt: Attempt, event: JsonObject): Boolean {
@@ -178,7 +188,7 @@ class LiveTransport(
         audioScope.launch {
             if (!isCurrent(attempt)) return@launch
             try { attempt.track?.setEnabled(!muted) } catch (_: Exception) { }
-            sendNow(attempt, buildJsonObject {
+            dispatch(attempt, buildJsonObject {
                 put("type", if (muted) "session.input_audio.mute" else "session.input_audio.unmute")
                 put("event_id", UUID.randomUUID().toString())
             })
@@ -193,7 +203,7 @@ class LiveTransport(
         audioScope.launch {
             if (!isCurrent(attempt)) return@launch
             try { attempt.track?.setEnabled(false) } catch (_: Exception) { }
-            sendNow(attempt, buildJsonObject {
+            dispatch(attempt, buildJsonObject {
                 put("type", "session.close")
                 put("event_id", UUID.randomUUID().toString())
             })
@@ -354,16 +364,28 @@ class LiveTransport(
             } catch (_: Exception) {
                 return
             }
-            val type = event.string("type") ?: return
-            if (!isCurrent(attempt) || !event.isSafeForCoordinator(type)) return
-            if (type == "session.started") {
-                // The first event can reach the UI before the queued OPEN callback runs.
-                attempt.channelOpen.set(true)
-                startedState = true
-                attempt.started.complete(Unit)
+            if (event.string("type") == null || !isCurrent(attempt)) return
+            val dialect = attempt.dialect
+            if (dialect == null) { deliver(attempt, event); return }
+            audioScope.launch {
+                if (!isCurrent(attempt)) return@launch
+                val step = dialect.inbound(event)
+                step.send.forEach { sendNow(attempt, it) }
+                step.deliver.forEach { deliver(attempt, it) }
             }
-            emitEvent(attempt, event)
         }
+    }
+
+    private fun deliver(attempt: Attempt, event: JsonObject) {
+        val type = event.string("type") ?: return
+        if (!isCurrent(attempt) || !event.isSafeForCoordinator(type)) return
+        if (type == "session.started") {
+            // The first event can reach the UI before the queued OPEN callback runs.
+            attempt.channelOpen.set(true)
+            startedState = true
+            attempt.started.complete(Unit)
+        }
+        emitEvent(attempt, event)
     }
 
     private suspend fun createOffer(attempt: Attempt): SessionDescription {
@@ -644,6 +666,7 @@ class LiveTransport(
         var source: org.webrtc.AudioSource? = null
         var track: org.webrtc.AudioTrack? = null
         var channel: DataChannel? = null
+        @Volatile var dialect: LiveEventDialect? = null
         var meterJob: Job? = null
         var scopeCompletion: DisposableHandle? = null
         val iceComplete = CompletableDeferred<Unit>()
