@@ -109,6 +109,8 @@ export class HostedVoice {
       await sql.query("SELECT pg_advisory_xact_lock(hashtext('mural-hosted-funding-cap'))");
       const minuteWallet = minutes ? await lockMinuteWallet(sql, account) : undefined;
       let wallet = minuteWallet ?? await lockWallet(sql, account, true);
+      if((await sql.query('SELECT 1 FROM minute_guest_link_intents WHERE guest_account_id=$1',[account])).rowCount)
+        throw new ServiceError('sign_in_to_continue',403);
       const previous = (await sql.query('SELECT id FROM hosted_sessions WHERE account_id=$1 AND idempotency_key=$2', [account, key])).rows[0];
       // SDP is not persisted. Retrying an offer never starts a second billed call.
       if (previous) throw new ServiceError('live_request_already_created', 409);

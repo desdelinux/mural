@@ -214,8 +214,9 @@ export function createApp(services: Services) {
   });
   app.post('/v1/minutes/link-guest', { bodyLimit: 1024 }, async request => {
     const account = await authenticate(db, request.headers.authorization), body = objectBody(request);
-    if (Object.keys(body).some(key => key !== 'guestAccessToken')) throw new ServiceError('invalid_request');
-    return linkGuestMinutes(db, account, stringField(body, 'guestAccessToken', 43));
+    if (Object.keys(body).some(key => !['guestAccessToken','deferPending','guestAccountID'].includes(key)) ||
+      (body.deferPending!==undefined&&typeof body.deferPending!=='boolean')) throw new ServiceError('invalid_request');
+    return linkGuestMinutes(db,account,body.guestAccessToken===undefined&&body.deferPending===true?undefined:stringField(body,'guestAccessToken',43),body.deferPending===true,body.guestAccountID===undefined?undefined:uuid(stringField(body,'guestAccountID',36)));
   });
   app.post('/v1/minutes/welcome', { bodyLimit: 20_000 }, async request => {
     const account = await authenticate(db, request.headers.authorization);

@@ -1,3 +1,4 @@
+import { finalizeDeferredGuestLinks } from './guest-minutes.js';
 import { createApp } from './app.js';
 import { connectDatabase } from './db.js';
 import { catalogFromEnvironment, SandboxPayments } from './payments.js';
@@ -99,8 +100,12 @@ try {
     void hostedHelpers?.expireBudgets().catch(() => { console.error('Hosted helper budget cleanup failed.'); });
   }, 15 * 60_000);
   cleanup.unref();
+  let guestLinkFlight:Promise<unknown>|undefined;
+  const retryGuestLinks=()=>{if(!guestLinkFlight)guestLinkFlight=finalizeDeferredGuestLinks(db)
+    .catch(()=>{console.error('Guest allowance transfer retry failed.');}).finally(()=>{guestLinkFlight=undefined;});};
+  const guestLinkCleanup=setInterval(retryGuestLinks,60_000);guestLinkCleanup.unref();retryGuestLinks();
   const close = async () => {
-    clearInterval(cleanup); await app.close(); await hosted?.stop(); await minuteCommerce?.runner.stop();
+    clearInterval(cleanup);clearInterval(guestLinkCleanup);await guestLinkFlight; await app.close(); await hosted?.stop(); await minuteCommerce?.runner.stop();
     await db.end(); process.exit(0);
   };
   process.on('SIGTERM', close); process.on('SIGINT', close);
