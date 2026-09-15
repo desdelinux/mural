@@ -1,8 +1,8 @@
 # Mural through a ChatGPT subscription
 
-Status: voice and text helpers both work through a ChatGPT Plus subscription. Voice runs on a different model and event protocol than Mural uses with an API key; text helpers keep the same model. Measured on 2026-09-14 with a Plus account and Codex CLI 0.154.0's sign-in session. The Android app has an experimental provider built on these findings.
+Status: abandoned on 2026-09-14 and kept as an archive. Voice and text helpers both work through a ChatGPT Plus subscription, and this branch has an experimental Android provider built on these findings. It was not merged because voice was unusable on a real phone; see [Outcome](#outcome).
 
-This is research for a personal, experimental option. OpenAI has not published terms that allow third-party apps to use the ChatGPT sign-in of Codex CLI. The backend below is undocumented and can change or close without notice.
+Measured on 2026-09-14 with a Plus account and Codex CLI 0.154.0's sign-in session. This is research for a personal, experimental option. OpenAI has not published terms that allow third-party apps to use the ChatGPT sign-in of Codex CLI. The backend below is undocumented and can change or close without notice.
 
 ## Why
 
@@ -106,6 +106,23 @@ A learner can use Mural on Android with only a ChatGPT subscription, without a M
 On the API 35 emulator, the app's own voice client and adapter opened a call, spoke the greeting with a subtitle and closed with usage.
 
 If the GPT-Live path opens for the account later, the adapter is unnecessary and the existing transport can be reused.
+
+## Outcome
+
+On an OPPO CPH2599 with Android 16, the provider signed in and started voice conversations, but the model heard itself and kept answering itself. The phone reports no hardware echo cancellation and routes the call to the loudspeaker, so some of the model's audio reaches the microphone. The Realtime server's voice detection treats that echo as the learner speaking and starts a new reply.
+
+The same phone and audio stack hold balanced five-minute conversations with `gpt-live-1` through an API key.
+
+| Conversation on that phone | Length | Learner fragments | Assistant fragments |
+| --- | --- | --- | --- |
+| API key, `gpt-live-1` | 4 min 43 s | 170 | 249 |
+| API key, `gpt-live-1` | 4 min 47 s | 139 | 268 |
+| Subscription, `gpt-realtime` | 22 s | 1 | 106 |
+| Subscription, `gpt-realtime` | 19 s | 1 | 118 |
+
+A fix would mute the microphone while the model's audio plays, using `output_audio_buffer.started` and `stopped`, and clear the input buffer afterwards. That removes interruptions, which `gpt-live-1` supports. Together with the plan's per-call cost and the unapproved sign-in, this was judged not worth pursuing.
+
+The work is worth revisiting if the GPT-Live path opens to ChatGPT plans, because the existing transport would then need no adapter.
 
 ## Open questions
 
