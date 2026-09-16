@@ -35,7 +35,7 @@
     <string name="error_request_refused">Mural no pudo completar esa solicitud. Prueba con otro tema.</string>
     <string name="error_http_401">Tu clave de OpenAI no fue aceptada. Revísala en Ajustes.</string>
     <string name="error_http_403_404">Esta clave de API puede no tener acceso al modelo solicitado. Revisa tu proyecto de OpenAI.</string>
-    <string name="error_http_429">Se alcanzó el límite de uso o de solicitudes de OpenAI. Revisa la facturación y los límites de tu proyecto.</string>
+    <string name="error_http_429">OpenAI está limitando las solicitudes. Espera un momento e inténtalo de nuevo. Si el problema continúa, revisa la facturación y los límites de tu proyecto.</string>
     <string name="error_http_generic">OpenAI no pudo completar la solicitud (HTTP %1$d). Inténtalo de nuevo.</string>
     <string name="error_backup_too_large">La copia supera el límite de 30 MB.</string>
     <string name="error_file_open_failed">No se pudo abrir el archivo elegido.</string>
@@ -85,6 +85,8 @@
     <string name="talk_typed_reply_field_label">Tu respuesta</string>
     <string name="talk_typed_reply_send_button">Enviar</string>
     <string name="talk_lookup_dialog_title">Un pequeño significado</string>
+    <string name="talk_pinyin_show">Mostrar pinyin</string>
+    <string name="talk_pinyin_hide">Ocultar pinyin</string>
     <string name="talk_lookup_field_label">Palabra o expresión</string>
     <string name="talk_lookup_button_action">Buscar</string>
     <string name="talk_status_connecting">Preparando la conversación…</string>
@@ -240,4 +242,6 @@
     <string name="consent_privacy_policy_link">Ver política de privacidad</string>
     <string name="consent_agree_button">Aceptar y continuar</string>
     <string name="consent_decline_button">Ahora no</string>
+    <string name="error_guest_secure_storage_unavailable">Mural no pudo restaurar los datos guardados de tu prueba gratuita. Tu historial de aprendizaje sigue disponible. Reinicia la aplicación para intentarlo de nuevo.</string>
+    <string name="error_sign_in_finishing_startup">Mural aún está guardando tu conversación. Intenta iniciar sesión de nuevo dentro de unos instantes.</string>
 </resources>

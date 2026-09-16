@@ -13,8 +13,11 @@ class EvidenceTest {
     }
     @Test fun correctionsRevokeEvidenceAndTranslationsKeepPreviousText() {
         val s = record(); s.translations["English::target:0"] = "the house"
+        s.translations["English::other:0"] = "unrelated"
         s.correctFragment("target", "la calle")
-        assertTrue(s.assessments.isEmpty()); assertTrue(s.translations.isEmpty())
+        assertTrue(s.assessments.isEmpty())
+        assertNull(s.translations["English::target:0"])
+        assertEquals("unrelated", s.translations["English::other:0"])
         assertEquals(listOf("la casa"), s.fragments.single().previousTexts)
         assertEquals(1, s.fragments.single().revision)
     }
@@ -32,6 +35,16 @@ class EvidenceTest {
         }
         assertNull(LearningEngine.validate(a.copy(revisionKey="old"),s))
     }
+    @Test fun quoteAcrossBareFragmentBoundaryIsKept() {
+        val session = SessionRecord(languageID = "es")
+        session.append(Fragment(id="f1",speaker=Speaker.user,text="Me gusta",startMS=0,endMS=500))
+        session.append(Fragment(id="f2",speaker=Speaker.user,text="el café",startMS=600,endMS=1200))
+        val passage = session.passages.single()
+        assertEquals("Me gusta el café", passage.text)
+        session.assessments += Assessment(passage.id, passage.revisionKey, Outcome.success, 1, "Sigue.", "Expresses liking",
+            listOf(WordProposal("gustar","to like","gusta",EvidenceKind.independent,0.95,listOf("f1","f2"),"Me gusta el café","es")))
+        assertEquals(1, LearningEngine.validate(session.assessments.single(), session)!!.words.size)
+    }
     @Test fun hiddenWordsAreLanguageScopedAndRepetitionIsDeduplicated() {
         val s = record(); val a = s.assessments.single(); s.assessments += a.copy()
         assertEquals(1,LearningEngine.project(listOf(s),"es").observationCount)
@@ -45,5 +58,14 @@ class EvidenceTest {
         val third = record().copy(startedAt=first.startedAt+2)
         third.assessments = mutableListOf(third.assessments.single().copy(outcome=Outcome.breakdown))
         assertEquals(0,LearningEngine.project(listOf(first,second,third),"es").challenge)
+    }
+    @Test fun invalidAssessmentDoesNotBlockALaterValidOneForTheSamePassage() {
+        val s = record()
+        val valid = s.assessments.single()
+        val invalid = valid.copy(revisionKey = "stale", createdAt = valid.createdAt - 1)
+        s.assessments = mutableListOf(invalid, valid)
+        val projection = LearningEngine.project(listOf(s), "es")
+        assertEquals(1, projection.observationCount)
+        assertEquals(1, projection.words.size)
     }
 }

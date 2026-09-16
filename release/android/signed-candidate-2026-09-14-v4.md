@@ -1,6 +1,6 @@
 # Android version 4 — 14 September 2026
 
-This is the historical v4 packaging record. The later [Play submission record](evidence/play-submission-2026-09-14.json) records v4 in review; the current source and default release spec are v5. Recheck this bundle with [specs/play-v4.json](specs/play-v4.json) using the [explicit-spec procedure](build-and-verify.md#3-validate-the-exact-bundle-and-assets). The original evidence below remains unchanged.
+This is the historical v4 packaging record. The later [Play submission record](evidence/play-submission-2026-09-14.json) records v4 in review; the current source and default release spec have moved to later versions. Recheck this bundle with [specs/play-v4.json](specs/play-v4.json) using the [explicit-spec procedure](build-and-verify.md#3-validate-the-exact-bundle-and-assets). The original evidence below remains unchanged.
 
 Version 4 adds an account-deletion support dialog with email, copy-address and web options. It retains the free-trial and personal-key experience. Paid checkout is disabled, with its environment set to `test` in both packaged builds.
 

@@ -128,6 +128,45 @@ final class MuralUITests: XCTestCase {
         XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "喝杯咖啡？")).firstMatch.exists)
     }
 
+    func testTypedReplyFailureKeepsDraftAndRetrySavesOnlyOneReply() {
+        for largeText in [false, true] {
+        let app = XCUIApplication()
+        app.launchArguments = ["--preview", "--test-typed-retry"] + (largeText ? ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"] : [])
+        app.launch()
+        XCTAssertTrue(app.buttons["Type instead"].waitForExistence(timeout: 10))
+        app.buttons["Type instead"].tap()
+        let field = app.textViews["typed-reply-input"].exists ? app.textViews["typed-reply-input"] : app.textFields["typed-reply-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap(); field.typeText("Quiero un cafe.")
+        app.buttons["typed-reply-send"].tap()
+        XCTAssertTrue(app.staticTexts["typed-reply-error"].waitForExistence(timeout: 5))
+        XCTAssertEqual(field.value as? String, "Quiero un cafe.")
+        XCTAssertTrue(app.buttons["typed-reply-send"].isHittable)
+        if app.keyboards.firstMatch.exists {
+            XCTAssertLessThanOrEqual(app.buttons["typed-reply-send"].frame.maxY, app.keyboards.firstMatch.frame.minY + 1)
+        }
+        let failure = XCTAttachment(screenshot: app.screenshot())
+        failure.name = largeText ? "Large text typed reply failure" : "Typed reply failure preserves draft"; failure.lifetime = .keepAlways; add(failure)
+        app.buttons["typed-reply-send"].tap()
+        XCTAssertTrue(field.waitForNonExistence(timeout: 5))
+        app.buttons["End conversation"].tap()
+        XCTAssertTrue(app.buttons["Conversation transcript"].waitForExistence(timeout: 8))
+        app.buttons["Conversation transcript"].tap()
+        XCTAssertEqual(app.staticTexts.matching(identifier: "transcript-user-passage").count, 1)
+        }
+    }
+
+    func testEndNoticeKeepsReasonButClearsStaleHelp() {
+        for inactivity in [true, false] {
+            let app = XCUIApplication()
+            app.launchArguments = ["--preview", "--ended-conversation", "--test-end-notice"] + (inactivity ? ["--test-inactivity"] : [])
+            app.launch()
+            let expected = inactivity ? "Mural ended this quiet session to avoid running up usage." : "Conversation saved. Final voice usage is unconfirmed."
+            XCTAssertTrue(app.staticTexts[expected].waitForExistence(timeout: 10))
+            XCTAssertFalse(app.staticTexts["Mural will make that a little simpler."].exists)
+        }
+    }
+
     private func launch(ended: Bool = false) -> XCUIApplication {
         let app = XCUIApplication(); app.launchArguments = ["--preview"] + (ended ? ["--ended-conversation"] : [])
         app.launch(); return app
@@ -333,4 +372,43 @@ final class MuralUITests: XCTestCase {
         app.buttons["Done"].tap()
         XCTAssertEqual(app.staticTexts["target-caption"].label, "Hei!")
     }
+    func testNetworkRecoveryLifecycleThroughRealTransport() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--preview", "--verify-network-recovery"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["Network recovery lifecycle passed"].waitForExistence(timeout: 15))
+        XCTAssertFalse(app.staticTexts["Network recovery lifecycle failed"].exists)
+    }
+    func testInactivityCountdownRemainsReadableAtLargestTextSize() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--preview", "--preview-inactivity", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+        app.launch()
+        let warning = app.staticTexts["conversation-status"]
+        XCTAssertTrue(warning.waitForExistence(timeout: 10))
+        XCTAssertTrue(warning.isHittable)
+        let screen = XCTAttachment(screenshot: app.screenshot())
+        screen.name = "Inactivity countdown - largest text"; screen.lifetime = .keepAlways; add(screen)
+    }
+    func testQuietSessionClosesAndPreservesItsExplanation() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--preview", "--preview-inactivity-timer"]
+        app.launch()
+        let ended = app.staticTexts["Mural ended this quiet session to avoid running up usage."]
+        XCTAssertTrue(ended.waitForExistence(timeout: 16))
+        XCTAssertEqual(app.staticTexts["microphone-status"].label, "Microphone off")
+    }
+    func testProviderQuotaShowsUsefulAdviceAndSafeSupportReference() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--preview", "--preview-provider-quota"]
+        app.launch()
+        let message = app.alerts.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "no available API credit")).firstMatch
+        XCTAssertTrue(message.waitForExistence(timeout: 10))
+        XCTAssertTrue(message.label.contains("req_support_fixture"))
+        XCTAssertFalse(message.label.contains("private"))
+        let screen = XCTAttachment(screenshot: app.screenshot())
+        screen.name = "Provider quota error"; screen.lifetime = .keepAlways; add(screen)
+        app.alerts.buttons["OK"].tap()
+        XCTAssertFalse(app.alerts.firstMatch.exists)
+    }
+
 }

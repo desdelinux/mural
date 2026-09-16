@@ -1,3 +1,6 @@
+import { Diagnostics } from './diagnostics.js';
+import { ServiceError } from './errors.js';
+import { finalizeDeferredGuestLinks } from './guest-minutes.js';
 import { createApp } from './app.js';
 import { connectDatabase } from './db.js';
 import { catalogFromEnvironment, SandboxPayments } from './payments.js';
@@ -14,8 +17,9 @@ import { HostedHelpers } from './hosted-helpers.js';
 import { OpenAIHostedResponses } from './hosted-responses-transport.js';
 import { InstallationGuestMinuteAttestor } from './guest-minutes.js';
 
+const diagnostics = new Diagnostics(record => { console.log(JSON.stringify(record)); });
 const databaseURL = process.env.DATABASE_URL;
-if (!databaseURL) { console.error('DATABASE_URL is required.'); process.exit(1); }
+if (!databaseURL) { diagnostics.record('service_failed', { operation: 'startup.database_configuration' }); process.exit(1); }
 const db = connectDatabase(databaseURL);
 let hosted: HostedVoice | undefined;
 let hostedHelpers: HostedHelpers | undefined;
@@ -31,7 +35,7 @@ try {
   const appleRevoker = appleClient && appleTeam && appleKey && appleFile ? new AppleTokenRevoker(db,
     { clientID: appleClient, teamID: appleTeam, keyID: appleKey, privateKeyPEM: await readFile(appleFile, 'utf8') }) : undefined;
   await appleRevoker?.validateConfiguration();
-  minuteCommerce = await configuredMinuteCommerce(db, process.env, { onFailure: code => console.error(code) });
+  minuteCommerce = await configuredMinuteCommerce(db, process.env, { onFailure: code => diagnostics.record('background_failed', { operation: 'commerce.reconcile' }, new ServiceError(code)) });
   const accessMode = process.env.HOSTED_VOICE_ACCESS ?? 'restricted-test';
   if (!['restricted-test','public-minutes'].includes(accessMode)) throw new Error('Invalid hosted access mode.');
   const publicMinuteAccess = accessMode==='public-minutes';
@@ -55,7 +59,7 @@ try {
     if ([...accounts].some(account => !/^[a-f0-9-]{36}$/.test(account))) throw new Error();
     const lifetimeFundingCapNano = BigInt(process.env.HOSTED_VOICE_LIFETIME_CAP_NANO ?? '0');
     if (process.env.HOSTED_HELPERS_EXPERIMENTAL === 'true') {
-      hostedHelpers = new HostedHelpers(db, new OpenAIHostedResponses(process.env.OPENAI_API_KEY ?? ''), {
+      hostedHelpers = new HostedHelpers(db, new OpenAIHostedResponses(process.env.OPENAI_API_KEY ?? '', fetch, diagnostics), {
         accountAllowlist: accounts, aggregateFundingCapNano: lifetimeFundingCapNano,publicMinuteAccess,publicPaidAccess,
         helperBudgetNanoPerMinute: BigInt(process.env.HOSTED_HELPER_BUDGET_PER_MINUTE_NANO ?? '50000000'),
         maxRequestsPerMinute: Number(process.env.HOSTED_HELPER_REQUESTS_PER_MINUTE ?? '24'),
@@ -65,9 +69,9 @@ try {
       });
       await hostedHelpers.expireBudgets();
     }
-    hosted = new HostedVoice(db, new OpenAILiveProvider(process.env.OPENAI_API_KEY ?? ''),
+    hosted = new HostedVoice(db, new OpenAILiveProvider(process.env.OPENAI_API_KEY ?? '', { diagnostics }),
       { accountAllowlist: accounts, billingUnit, lifetimeFundingCapNano,publicMinuteAccess,publicPaidAccess, helpers: hostedHelpers,
-        onStartupFailure: diagnostic => console.warn(JSON.stringify({ event: 'live_startup_failed', ...diagnostic })) });
+        diagnostics });
     await hosted.start();
   }
   const accessConfig = accessRequestConfig(process.env);
@@ -91,23 +95,28 @@ try {
     !(appleClient && appleRevoker)) throw new Error('No account identity provider configured.');
   const app = createApp({ db, auth: { googleClientID: process.env.GOOGLE_CLIENT_ID, appleClientID: appleClient,
     googleAndroidServerClientID, googleAndroidClientIDs }, payments, appleRevoker, hosted, hostedHelpers,
-    minuteCommerce, accessRequests, accounts, aiReports,guestMinuteAttestor });
+    minuteCommerce, accessRequests, accounts, aiReports,guestMinuteAttestor,
+    diagnostics });
   const cleanup = setInterval(() => {
-    void pruneAuthenticationRecords(db).catch(() => { console.error('Account retention cleanup failed.'); });
-    void pruneAccessRequests(db).catch(() => { console.error('Access request retention cleanup failed.'); });
-    void pruneAIReports(db).catch(() => { console.error('AI report retention cleanup failed.'); });
-    void hostedHelpers?.expireBudgets().catch(() => { console.error('Hosted helper budget cleanup failed.'); });
+    void pruneAuthenticationRecords(db).catch(error => { diagnostics.record('background_failed', { operation: 'retention.accounts' }, error); });
+    void pruneAccessRequests(db).catch(error => { diagnostics.record('background_failed', { operation: 'retention.access_requests' }, error); });
+    void pruneAIReports(db).catch(error => { diagnostics.record('background_failed', { operation: 'retention.reports' }, error); });
+    void hostedHelpers?.expireBudgets().catch(error => { diagnostics.record('background_failed', { operation: 'helpers.expire' }, error); });
   }, 15 * 60_000);
   cleanup.unref();
+  let guestLinkFlight:Promise<unknown>|undefined;
+  const retryGuestLinks=()=>{if(!guestLinkFlight)guestLinkFlight=finalizeDeferredGuestLinks(db)
+    .catch(error=>{diagnostics.record('background_failed', { operation: 'guest.transfer' }, error);}).finally(()=>{guestLinkFlight=undefined;});};
+  const guestLinkCleanup=setInterval(retryGuestLinks,60_000);guestLinkCleanup.unref();retryGuestLinks();
   const close = async () => {
-    clearInterval(cleanup); await app.close(); await hosted?.stop(); await minuteCommerce?.runner.stop();
+    clearInterval(cleanup);clearInterval(guestLinkCleanup);await guestLinkFlight; await app.close(); await hosted?.stop(); await minuteCommerce?.runner.stop();
     await db.end(); process.exit(0);
   };
   process.on('SIGTERM', close); process.on('SIGINT', close);
   await app.listen({ port: Number(process.env.PORT ?? 8080), host: '0.0.0.0' });
   minuteCommerce?.runner.start();
-  console.info('Mural API is running.');
-} catch {
-  console.error('Mural could not start. Check configuration; no secret values are logged.');
+  diagnostics.record('service_started', { operation: 'startup' });
+} catch (error) {
+  diagnostics.record('service_failed', { operation: 'startup' }, error);
   await hosted?.stop(); await minuteCommerce?.runner.stop(); await db.end(); process.exitCode = 1;
 }

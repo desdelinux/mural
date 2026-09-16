@@ -17,6 +17,13 @@ import XCTest
             continuation.resume(returning: FinalAssessmentResult(sessionID: session.id, languageID: session.languageID,
                 assessment: assessment, inputTokens: 100, outputTokens: 20))
         }
+        func finishWrongLanguage() {
+            let (session, passage, continuation) = pending.removeFirst()
+            let assessment = Assessment(passageID: passage.id, revisionKey: passage.revisionKey, outcome: .success,
+                suggestedLevel: 1, nextGoal: "x", capability: "x", words: [])
+            continuation.resume(returning: FinalAssessmentResult(sessionID: session.id, languageID: "fr",
+                assessment: assessment, inputTokens: 1, outputTokens: 1))
+        }
     }
     private func ended(_ languageID: String = "es") -> SessionRecord {
         var session = SessionRecord(languageID: languageID)
@@ -108,5 +115,18 @@ import XCTest
         XCTAssertFalse(queue.submit(session))
         XCTAssertEqual(session.assessments.count, 1)
         XCTAssertEqual(session.outputTokens, 20)
+    }
+
+    func testRejectedResultClearsThePendingJob() async {
+        let session = ended(), provider = Provider()
+        var received = 0
+        let queue = FinalAssessmentQueue(timeout: 15, assess: provider.assess)
+        queue.onResult = { _ in received += 1 }
+        XCTAssertTrue(queue.submit(session))
+        await waitUntil { provider.pending.count == 1 }
+        provider.finishWrongLanguage()
+        await waitUntil { !queue.isPending(session.id) }
+        XCTAssertEqual(received, 0)
+        XCTAssertTrue(queue.submit(session))
     }
 }

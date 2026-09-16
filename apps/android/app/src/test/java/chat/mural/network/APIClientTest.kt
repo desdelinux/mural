@@ -16,6 +16,18 @@ import org.junit.Before
 import org.junit.Test
 
 class APIClientTest {
+    @Test fun providerErrorCategoriesAreBoundedAndNeverShowRawMessagesOrRetry() = runBlocking {
+        for (body in listOf("""{"error":{"code":"insufficient_quota","message":"private billing data"}}""", "x".repeat(16_385), "not json")) {
+            server.enqueue(MockResponse().setResponseCode(429).setHeader("x-request-id", "req_support").setBody(body))
+            try { api.post("responses", buildJsonObject {}); fail("accepted error") }
+            catch (error: APIClient.APIException.Http) {
+                assertEquals("req_support", error.reference)
+                assertFalse(error.message.orEmpty().contains("private"))
+                assertEquals(if (body.startsWith('{')) "insufficient_quota" else null, error.code)
+            }
+        }
+        assertEquals(3, server.requestCount)
+    }
     private lateinit var server: MockWebServer
     private lateinit var api: APIClient
     @Before fun setup() {

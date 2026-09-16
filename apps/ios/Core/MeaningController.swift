@@ -14,6 +14,9 @@ public struct MeaningRequest: Equatable, Sendable {
     }
     public var cacheKey: String { Self.cacheKey(revisionKey: revisionKey, language: meaningLanguage) }
     public static func cacheKey(revisionKey: String, language: String) -> String { language + "::" + revisionKey }
+    /// Caption text sent to the translation helper. Must match what the learner sees for this revision.
+    public var translationInput: String { Self.translationInput(for: text) }
+    public static func translationInput(for text: String) -> String { text }
     func sharesContext(with other: Self) -> Bool {
         sessionID == other.sessionID && passageID == other.passageID &&
         learningLanguageID == other.learningLanguageID && meaningLanguage == other.meaningLanguage
@@ -90,6 +93,7 @@ public struct MeaningResult: Sendable {
             } catch {
                 guard token == self.generation, !Task.isCancelled else { return }
                 self.worker = nil; self.isLoading = false
+                if self.rendered != self.desired { self.text = "" }
                 self.error = error.localizedDescription
             }
         }

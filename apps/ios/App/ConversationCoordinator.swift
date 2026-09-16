@@ -20,6 +20,7 @@ import MuralCore
     var meaningError: String? { meanings.error }
     private(set) var working = false
     var error: String?
+    var typedReplyError: String?
     var notice: String?
     var showSettings = false
     var showAIConsent = false
@@ -33,7 +34,11 @@ import MuralCore
     private var durationTask: Task<Void, Never>?
     private var saveTask: Task<Void, Never>?
     private var observers: [NSObjectProtocol] = []
-    private var lastActivity = Date()
+    private var activity = ConversationActivity(now: 0)
+    private var conversationPace = ConversationPace()
+    private(set) var inactivitySeconds: Int?
+    private var activityNow: Double { ProcessInfo.processInfo.systemUptime }
+    func noteTypingActivity() { if state == .active { activity.typing(now: activityNow); inactivitySeconds = nil } }
     private var lastLanguageCheck = ""
     private var pendingCommands: [String: Date] = [:]
     private var lastAssessmentKey = ""
@@ -53,7 +58,7 @@ import MuralCore
         meanings = MeaningController { request in
             guard store.preferences.aiConsentVersion == AIProcessingConsent.version || AudioVerification.requested else { throw AIProcessingConsent.ConsentError.required }
             guard let language = LanguageRegistry.module(for: request.learningLanguageID) else { throw ArchiveError.unsupportedLanguage }
-            let result = try await api.respond(instructions: TeachingPolicy.translation(language: language, meaningLanguage: request.meaningLanguage), input: String(request.text.suffix(2200)))
+            let result = try await api.respond(instructions: TeachingPolicy.translation(language: language, meaningLanguage: request.meaningLanguage), input: request.translationInput)
             return MeaningResult(text: result.text, inputTokens: result.usage.input, outputTokens: result.usage.output)
         }
         meanings.onResult = { [weak self] request, result in
@@ -72,7 +77,10 @@ import MuralCore
         transport.onLevels = { [weak self] input, output in
             guard let self else { return }
             self.inputLevel = input; self.outputLevel = output
-            if input > 0.03 || output > 0.03 { self.lastActivity = .now }
+            if self.state == .active {
+                if input > 0.03 { self.activity.inputActive(now: self.activityNow) }
+                if output > 0.03 { self.activity.assistantActive(now: self.activityNow) }
+            }
         }
         transport.onFailure = { [weak self] in self?.fail($0) }
         observers.append(NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] notification in
@@ -86,7 +94,8 @@ import MuralCore
     var userPassage: Passage? { session?.passages.last(where: { $0.speaker == .user }) }
     var caption: String { assistantPassage?.text ?? language.greeting }
     var status: String {
-        switch state {
+        if state == .active, let seconds = inactivitySeconds { return "Ending in \(seconds)s\nReply to continue" }
+        return switch state {
         case .idle: "Ready when you are"
         case .connecting: "Getting comfortable…"
         case .active: outputLevel > 0.02 ? "Mural is speaking" : inputLevel > 0.02 ? "I’m listening" : "Take your time"
@@ -189,6 +198,9 @@ import MuralCore
     }
     func help() {
         guard state == .active else { return }
+        activity.learnerEngaged(now: activityNow); inactivitySeconds = nil
+        conversationPace.askForHelp(after: userPassage)
+        append("instructions", conversationPace.instruction)
         append("instructions", TeachingPolicy.help(language: language))
         notice = "Mural will make that a little simpler."
     }
@@ -225,7 +237,10 @@ import MuralCore
         save(); state = .ended
         if let session { finalAssessments.submit(session) }
         scheduleTranslation(); scheduleReset()
-        if !final, session?.providerID != nil { notice = "Conversation saved. Final voice usage is unconfirmed." }
+        let endNotices = ["You’ve reached your conversation time limit.", "Mural ended this quiet session to avoid running up usage."]
+        if !endNotices.contains(notice ?? "") {
+            notice = !final && session?.providerID != nil ? "Conversation saved. Final voice usage is unconfirmed." : nil
+        }
         if backgroundTask != .invalid { UIApplication.shared.endBackgroundTask(backgroundTask); backgroundTask = .invalid }
     }
     private func fail(_ message: String) {
@@ -242,6 +257,9 @@ import MuralCore
     }
     @discardableResult private func append(_ kind: String, _ text: String, delegationID: String? = nil) -> Bool {
         guard state == .active else { return false }
+        #if DEBUG && targetEnvironment(simulator)
+        if typedReplyPreview { return true }
+        #endif
         let id = UUID().uuidString
         // Bound short instruction updates conservatively below the protocol token cap.
         let accepted = transport.send(["type": "session.\(kind).append", "event_id": id,
@@ -258,7 +276,7 @@ import MuralCore
             session?.voiceSeconds = 15; save()
         case "session.started":
             guard state == .connecting else { return }
-            state = .active; lastActivity = .now
+            state = .active; activity = ConversationActivity(now: activityNow); conversationPace = ConversationPace(); inactivitySeconds = nil
             session?.providerID = (event["session"] as? [String: Any])?["id"] as? String
             append("instructions", TeachingPolicy.greeting(language: language))
             startDurationChecks(); save()
@@ -268,7 +286,11 @@ import MuralCore
             let speaker: Speaker = type == "session.input_transcript.delta" ? .user : .assistant
             let fragment = Fragment(id: event["event_id"] as? String ?? UUID().uuidString, speaker: speaker, text: delta,
                                     startMS: start, endMS: end, meaningVisible: store.preferences.meaningVisible)
-            session?.append(fragment); lastActivity = .now; scheduleSave()
+            session?.append(fragment); scheduleSave()
+            if !delta.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if speaker == .user { activity.learnerEngaged(now: activityNow); inactivitySeconds = nil }
+                else { activity.assistantActive(now: activityNow) }
+            }
             if speaker == .assistant { scheduleTranslation(); if state == .active { checkLanguage() } }
             else if state == .active { scheduleAssessment() }
         case "session.delegation.created":
@@ -290,13 +312,18 @@ import MuralCore
         durationTask?.cancel()
         durationTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(5))
-                guard let self, self.state == .active, let session = self.session else { return }
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled, let self, self.state == .active, let session = self.session else { return }
                 if Date().timeIntervalSince(session.startedAt) > Double(self.store.preferences.sessionMinutes * 60) {
                     self.notice = "You’ve reached your conversation time limit."; self.end(reason: "Time limit"); return
                 }
-                if Date().timeIntervalSince(self.lastActivity) > 120 {
+                self.inactivitySeconds = nil
+                switch self.activity.tick(now: self.activityNow, muted: self.isMuted, busy: self.working || !self.delegationTasks.isEmpty) {
+                case .checkIn: self.append("instructions", TeachingPolicy.checkIn(language: self.language))
+                case .warning(let seconds): self.inactivitySeconds = seconds
+                case .end:
                     self.notice = "Mural ended this quiet session to avoid running up usage."; self.end(reason: "Inactivity"); return
+                case .wait: break
                 }
                 self.pendingCommands = self.pendingCommands.filter { Date().timeIntervalSince($0.value) <= 20 }
             }
@@ -341,10 +368,37 @@ import MuralCore
         let sample = ["nb": "Jeg liker kaffe.", "de": "Ich mag Kaffee.", "it": "Mi piace il caffè.", "pt": "Eu gosto de café.", "zh": "我喜欢喝咖啡。"]
         record.append(Fragment(speaker: .assistant, text: sample[language.id] ?? language.greeting, startMS: 0, endMS: 1000))
         record.translations[MeaningRequest.cacheKey(revisionKey: record.passages[0].revisionKey, language: "English")] = "I like coffee."
-        session = record; state = .closing; finish(final: true)
+        let arguments = ProcessInfo.processInfo.arguments
+        let checkNotice = arguments.contains("--test-end-notice")
+        if checkNotice {
+            record.providerID = "fixture-only"
+            notice = arguments.contains("--test-inactivity") ? "Mural ended this quiet session to avoid running up usage." : "Mural will make that a little simpler."
+        }
+        session = record; state = .closing; finish(final: !checkNotice)
     }
     #endif
     #if DEBUG && targetEnvironment(simulator)
+    private var typedReplyPreview: Bool {
+        ProcessInfo.processInfo.arguments.contains("--preview") && ProcessInfo.processInfo.arguments.contains("--test-typed-retry")
+    }
+    private var previewReplyAttempts = 0
+    func prepareTypedReplyPreview() {
+        guard typedReplyPreview else { return }
+        session = SessionRecord(languageID: language.id)
+        state = .active
+    }
+    func prepareConversationPolicyPreview() {
+        let args = ProcessInfo.processInfo.arguments
+        guard args.contains("--preview") else { return }
+        if args.contains("--preview-inactivity") || args.contains("--preview-inactivity-timer") {
+            prepareScreenshot(.conversation)
+            activity = ConversationActivity(now: activityNow - 25)
+            inactivitySeconds = 5
+            if args.contains("--preview-inactivity-timer") { startDurationChecks() }
+        } else if args.contains("--preview-provider-quota") {
+            error = ProviderFailure(status: 429, body: Data(#"{"error":{"code":"insufficient_quota","message":"private"}}"#.utf8), reference: "req_support_fixture").localizedDescription
+        }
+    }
     func prepareScreenshot(_ screen: ScreenshotPreview.Screen) {
         store.selectLanguage("es")
         store.updatePreferences { $0.meaningVisible = true; $0.meaningLanguage = "English"; $0.hasOnboarded = true }
@@ -386,6 +440,9 @@ import MuralCore
                 self.lastAssessmentKey = p.revisionKey
                 self.addUsage(APIUsage(input: result.inputTokens, output: result.outputTokens, searches: result.searchCalls)); self.save()
                 let learner = self.store.learner
+                if self.conversationPace.observe(validated, passage: p, languageID: snapshot.languageID) {
+                    self.append("instructions", self.conversationPace.instruction)
+                }
                 self.append("thinking", "Teaching context, not spoken text: challenge \(learner.challenge)/5 in \(targetLanguage.name). Next goal: \(learner.nextGoal). Revisit naturally: \(learner.words.filter { $0.dueAt < .now }.prefix(3).map(\.lemma).joined(separator: ", ")).")
             } catch is CancellationError { }
             catch let error as URLError where error.code == .cancelled { }
@@ -433,21 +490,57 @@ import MuralCore
             }
         }
     }
-    func sendTyped(_ text: String) async {
+    @discardableResult func sendTyped(_ text: String) async -> Bool {
+        typedReplyError = nil
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard state == .active, !clean.isEmpty, let snapshot = session else { return }
-        let offset = Int(Date().timeIntervalSince(snapshot.startedAt) * 1000)
-        session?.append(Fragment(speaker: .user, text: String(clean.prefix(2000)), startMS: offset, endMS: offset + 1,
-                                 meaningVisible: store.preferences.meaningVisible, typed: true))
-        save(); working = true
-        defer { if session?.id == snapshot.id { working = false } }
+        guard !working else { return false }
+        guard state == .active, !clean.isEmpty, var draft = session else {
+            typedReplyError = "Start a conversation before sending your reply."
+            return false
+        }
+        let sessionID = draft.id
+        let offset = Int(Date().timeIntervalSince(draft.startedAt) * 1000)
+        let fragment = Fragment(speaker: .user, text: String(clean.prefix(2000)), startMS: offset, endMS: offset + 1,
+                                meaningVisible: store.preferences.meaningVisible, typed: true)
+        draft.append(fragment)
+        activity.learnerEngaged(now: activityNow); inactivitySeconds = nil
+        working = true
+        defer { if session?.id == sessionID { working = false } }
         do {
-            let result = try await api.respond(instructions: TeachingPolicy.typedReply(language: language), input: TeachingPolicy.context(session!))
-            guard session?.id == snapshot.id, state == .active else { return }
+            let result = try await typedReplyResponse(instructions: TeachingPolicy.typedReply(language: language), input: TeachingPolicy.context(draft))
+            guard session?.id == sessionID, state == .active else {
+                typedReplyError = "This conversation has ended. Your reply has not been sent."
+                return false
+            }
             addUsage(result.usage)
-            append("thinking", "The learner typed (data): \(String(clean.prefix(650)))")
-            append("commentary", result.text); scheduleAssessment(); save()
-        } catch { if session?.id == snapshot.id { self.error = error.localizedDescription } }
+            guard append("thinking", "The learner typed (data): \(String(clean.prefix(650)))"),
+                  append("commentary", result.text) else {
+                typedReplyError = "Your reply couldn’t be sent. Check your connection and try again."
+                return false
+            }
+            session?.append(fragment)
+            activity.learnerEngaged(now: activityNow); inactivitySeconds = nil
+            #if DEBUG && targetEnvironment(simulator)
+            if !typedReplyPreview { scheduleAssessment() }
+            #else
+            scheduleAssessment()
+            #endif
+            save()
+            return true
+        } catch {
+            if session?.id == sessionID { typedReplyError = error.localizedDescription }
+            return false
+        }
+    }
+    private func typedReplyResponse(instructions: String, input: String) async throws -> APIResult {
+        #if DEBUG && targetEnvironment(simulator)
+        if typedReplyPreview {
+            previewReplyAttempts += 1
+            if previewReplyAttempts == 1 { throw APIClient.APIError.http(503) }
+            return APIResult(text: "Gracias.", sources: [], usage: APIUsage())
+        }
+        #endif
+        return try await api.respond(instructions: instructions, input: input)
     }
     func lookup(word: String, sentence: String) async throws -> String {
         guard hasAIConsent else { throw AIProcessingConsent.ConsentError.required }

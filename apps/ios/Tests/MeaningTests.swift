@@ -126,6 +126,25 @@ import XCTest
         XCTAssertEqual(controller.text, "Hi!")
     }
 
+    func testFailureForAnExtendedCaptionClearsItsEarlierPartialMeaning() async {
+        let translator = Translator()
+        let controller = MeaningController(delay: .zero, translate: translator.translate)
+        controller.update(request("Hei"))
+        await waitUntil { translator.requests.count == 1 }
+        translator.succeed("Hi")
+        await waitUntil { !controller.isLoading }
+        controller.update(request("Hei, jeg liker kaffe.", revision: 1))
+        await waitUntil { translator.requests.count == 2 }
+        translator.fail()
+        await waitUntil { controller.error != nil }
+        XCTAssertEqual(controller.text, "")
+        controller.retry()
+        await waitUntil { translator.requests.count == 3 }
+        translator.succeed("Hi, I like coffee.")
+        await waitUntil { !controller.isLoading }
+        XCTAssertEqual(controller.text, "Hi, I like coffee.")
+    }
+
     func testChangingMeaningLanguageClearsOldTextAndUsesSeparateCacheKeys() async {
         let translator = Translator()
         let controller = MeaningController(delay: .zero, translate: translator.translate)
@@ -141,4 +160,35 @@ import XCTest
         await waitUntil { !controller.isLoading }
         XCTAssertEqual(controller.text, "Salut")
     }
+
+    func testTranslationInputKeepsTheStartOfLongPassages() {
+        let text = "UNIQUE_START " + String(repeating: "y", count: 2_300) + " END"
+        XCTAssertTrue(MeaningRequest.translationInput(for: text).hasPrefix("UNIQUE_START"))
+        XCTAssertTrue(MeaningRequest.translationInput(for: text).hasSuffix(" END"))
+        XCTAssertEqual(MeaningRequest.translationInput(for: text), text)
+    }
+    func testLongCaptionFailureIsVisibleAndOnlyCompleteRetryIsCached() async {
+        let text = "UNIQUE_START " + String(repeating: "我喜欢咖啡。 ", count: 600) + " UNIQUE_END"
+        let translator = Translator()
+        let controller = MeaningController(delay: .zero, translate: translator.translate)
+        var saved: [String: String] = [:]
+        controller.onResult = { request, result in saved[request.cacheKey] = result.text }
+        let longRequest = request(text)
+        controller.update(longRequest)
+        await waitUntil { translator.requests.count == 1 }
+        XCTAssertEqual(translator.requests[0].translationInput, text)
+        translator.fail()
+        await waitUntil { !controller.isLoading }
+        XCTAssertNotNil(controller.error)
+        XCTAssertTrue(saved.isEmpty)
+        XCTAssertEqual(controller.text, "")
+        controller.retry()
+        await waitUntil { translator.requests.count == 2 }
+        XCTAssertEqual(translator.requests[1].translationInput, text)
+        translator.succeed("The entire caption, including its beginning and end.")
+        await waitUntil { !controller.isLoading }
+        XCTAssertNil(controller.error)
+        XCTAssertEqual(saved[longRequest.cacheKey], controller.text)
+    }
+
 }

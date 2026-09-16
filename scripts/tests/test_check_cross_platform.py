@@ -74,6 +74,26 @@ object TeachingPolicy {
 class ConstantsTests(unittest.TestCase):
     GAP_ONLY = [c for c in ccp.CONSTANTS if c[0] == 'transcript_gap_ms']
 
+    def test_idle_timeout_compares_fractional_values(self):
+        idle_only = [c for c in ccp.CONSTANTS if c[0] == 'idle_voice_s']
+        for swift, kotlin, matches in [('30.5', '30.5', True), ('30.5', '30.9', False),
+                                       ('30', '30.5', False), ('30.5', '30', False)]:
+            with self.subTest(swift=swift, kotlin=kotlin), tempfile.TemporaryDirectory() as tmp:
+                root = pathlib.Path(tmp)
+                for (relative, _), content in zip(idle_only[0][2:], [
+                    f'public static let idleVoiceSeconds: Double = {swift}',
+                    f'const val IDLE_VOICE_SECONDS = {kotlin}',
+                ]):
+                    path = root / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(content)
+                failures = ccp.check_constants(root, idle_only)
+                if matches:
+                    self.assertEqual(failures, [])
+                else:
+                    self.assertEqual(len(failures), 1)
+                    self.assertIn(f'idle_voice_s is {swift} in Swift but {kotlin} in Kotlin', failures[0])
+
     def write_models(self, root, swift_gap, kotlin_gap):
         core = root / 'apps/ios/Core'
         core.mkdir(parents=True)
@@ -199,6 +219,11 @@ class ArchiveFieldsReverseTests(unittest.TestCase):
         kotlin = ArchiveFieldsTests.KOTLIN_OK.replace('var title: String = "A conversation"', 'var title: String = "A conversation", val mood: String')
         failures = self.check(ArchiveFieldsTests.SWIFT_OK, kotlin)
         self.assertTrue(any('SessionRecord.mood' in f for f in failures), failures)
+
+    def test_missing_required_field_check_fails_when_kotlin_validates_keys(self):
+        kotlin = ArchiveFieldsTests.KOTLIN_OK + 'fun fields(obj: JsonObject, names: String) {}\n'
+        failures = self.check(ArchiveFieldsTests.SWIFT_OK, kotlin)
+        self.assertTrue(any('fields(s, ...)' in f and 'SessionRecord' in f for f in failures), failures)
 
     def test_matching_fields_check_passes(self):
         kotlin = ArchiveFieldsTests.KOTLIN_OK + 'fun check(s: JsonObject) { fields(s, "id languageID title") }\n'

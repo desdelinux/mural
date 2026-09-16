@@ -4,9 +4,9 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SessionLimitsTest {
-    @Test fun quietVoiceSessionEndsAfterTwoMinutes() {
-        assertFalse(SessionLimits.endsForInactivity(voice = true, idleSeconds = 119.0))
-        assertTrue(SessionLimits.endsForInactivity(voice = true, idleSeconds = 121.0))
+    @Test fun quietVoiceSessionEndsAfterThirtySeconds() {
+        assertFalse(SessionLimits.endsForInactivity(voice = true, idleSeconds = 29.0))
+        assertTrue(SessionLimits.endsForInactivity(voice = true, idleSeconds = 30.0))
     }
 
     @Test fun writtenConversationStaysOpenWhileTheLearnerTypes() {

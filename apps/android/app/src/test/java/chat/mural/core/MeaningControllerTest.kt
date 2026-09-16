@@ -339,4 +339,29 @@ class MeaningControllerTest {
         }
     }
 
+    @Test fun translationInputKeepsTheStartOfLongPassages() {
+        val text = "UNIQUE_START " + "y".repeat(2300) + " END"
+        val prepared = MeaningRequest.translationInput(text)
+        assertTrue(prepared.startsWith("UNIQUE_START"))
+        assertTrue(prepared.endsWith(" END"))
+        assertEquals(text, prepared)
+    }
+
+    @Test fun longCaptionFailureDoesNotCachePartialMeaningAndRetryKeepsFullInput() = runTest {
+        val caption = "UNIQUE_START " + "我喜欢咖啡。 ".repeat(600) + " UNIQUE_END"
+        val translator = Translator(); val controller = controller(translator)
+        var saved = 0
+        controller.onResult = { _, _ -> saved++ }
+        controller.update(request(caption)); runCurrent()
+        assertEquals(caption, translator.requests.single().translationInput)
+        translator.fail(); runCurrent()
+        assertNotNull(controller.error)
+        assertEquals(0, saved)
+        controller.retry(); runCurrent()
+        assertEquals(caption, translator.requests.last().translationInput)
+        translator.succeed("The complete translation."); runCurrent()
+        assertEquals(1, saved)
+        assertEquals("The complete translation.", controller.text)
+    }
+
 }

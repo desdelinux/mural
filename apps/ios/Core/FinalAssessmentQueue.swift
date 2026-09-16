@@ -51,9 +51,9 @@ public struct FinalAssessmentResult: Sendable {
         let request = Task { [weak self] in
             do {
                 let result = try await assess(session, passage)
-                guard !Task.isCancelled, let self, let job = self.jobs[session.id], job.token == token,
-                      Date() <= job.deadline, result.sessionID == session.id, result.languageID == session.languageID else { return }
+                guard !Task.isCancelled, let self, let job = self.jobs[session.id], job.token == token else { return }
                 self.jobs.removeValue(forKey: session.id)?.timer.cancel()
+                guard Date() <= job.deadline, result.sessionID == session.id, result.languageID == session.languageID else { return }
                 self.onResult?(result)
             } catch {
                 guard let self, self.jobs[session.id]?.token == token else { return }

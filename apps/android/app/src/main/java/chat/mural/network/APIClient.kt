@@ -1,6 +1,7 @@
 package chat.mural.network
 
 import chat.mural.core.SourceLink
+import chat.mural.core.ProviderFailureKind
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
@@ -13,6 +14,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.Call
 import okhttp3.Callback
@@ -79,7 +81,15 @@ class APIClient private constructor(
                 override fun onResponse(call: Call, response: Response) {
                     try {
                         val value = response.use {
-                            if (it.code !in 200..299) throw APIException.Http(it.code)
+                            if (it.code !in 200..299) {
+                                val errorCode = runCatching {
+                                    val payload = it.peekBody(16_385).string()
+                                    if (payload.toByteArray(Charsets.UTF_8).size > 16_384) null else
+                                        (JSON.parseToJsonElement(payload).jsonObject["error"] as? JsonObject)
+                                            ?.get("code")?.jsonPrimitive?.contentOrNull
+                                }.getOrNull()
+                                throw APIException.Http(it.code, errorCode, it.header("x-request-id"))
+                            }
                             val payload = it.readBoundedBody()
                             try { JSON.parseToJsonElement(payload).jsonObject }
                             catch (_: Exception) { throw APIException.InvalidResponse }
@@ -153,7 +163,11 @@ class APIClient private constructor(
         data object InvalidResponse : APIException("OpenAI returned an incomplete response. Please try again.")
         data object Incomplete : APIException("OpenAI returned an incomplete response. Please try again.")
         data object Refused : APIException("Mural couldn't complete that request. Try a different topic.")
-        class Http(val status: Int) : APIException(messageFor(status))
+        class Http(val status: Int, code: String? = null, reference: String? = null) : APIException(messageFor(status)) {
+            val code = ProviderFailureKind.safeCode(code)
+            val reference = ProviderFailureKind.safeReference(reference)
+            val kind get() = ProviderFailureKind.classify(status, code)
+        }
 
         companion object {
             private fun messageFor(status: Int): String = when (status) {

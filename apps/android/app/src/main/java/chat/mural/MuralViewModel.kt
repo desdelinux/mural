@@ -19,20 +19,69 @@ import kotlinx.serialization.json.*
 /** Maps a network/credential failure reason to its user-facing string resource, or 0 if unmapped. */
 @StringRes
 internal fun errorMessageRes(e: Throwable): Int = when (e) {
+    is HostedFailure -> hostedErrorMessageRes(e)
+    is AccountFailure.Http -> when (e.status) {
+        401 -> R.string.hosted_sign_in_again
+        429 -> R.string.hosted_rate_limit
+        else -> R.string.hosted_request_failed
+    }
+    AccountFailure.Unavailable -> R.string.account_error_connection
     is APIClient.APIException.MissingKey -> R.string.error_missing_key
     is APIClient.APIException.Refused -> R.string.error_request_refused
     is APIClient.APIException.InvalidResponse, is APIClient.APIException.Incomplete -> R.string.error_incomplete_response
-    is APIClient.APIException.Http -> when (e.status) {
-        401 -> R.string.error_http_401
-        403, 404 -> R.string.error_http_403_404
-        429 -> R.string.error_http_429
-        else -> R.string.error_http_generic
+    is APIClient.APIException.Http -> when (e.kind) {
+        ProviderFailureKind.authentication -> R.string.error_http_401
+        ProviderFailureKind.modelAccess -> R.string.error_http_403_404
+        ProviderFailureKind.quota -> R.string.error_provider_quota
+        ProviderFailureKind.rateLimit -> R.string.error_http_429
+        ProviderFailureKind.unavailable -> R.string.error_provider_unavailable
+        ProviderFailureKind.invalidRequest -> R.string.error_provider_request
+        ProviderFailureKind.unknown -> R.string.error_http_generic
     }
+    is java.net.SocketTimeoutException -> R.string.error_request_timeout
+    is java.net.UnknownHostException, is java.net.ConnectException -> R.string.error_request_connection
     is CredentialStore.CredentialException.Invalid -> R.string.error_key_invalid
     is CredentialStore.CredentialException.Save -> R.string.error_key_save
     is CredentialStore.CredentialException.Remove -> R.string.error_key_remove
     else -> 0
 }
+
+@StringRes
+internal fun hostedErrorMessageRes(failure: HostedFailure): Int = when (failure) {
+    HostedFailure.SignInRequired -> R.string.hosted_sign_in_again
+    HostedFailure.Unconfirmed -> R.string.hosted_unconfirmed
+    HostedFailure.Unavailable -> R.string.hosted_unavailable
+    is HostedFailure.Http -> when {
+        needsAccountRecovery(failure) -> R.string.hosted_sign_in_again
+        failure.code in setOf("insufficient_minutes", "insufficient_credit") -> R.string.hosted_no_minutes
+        failure.code == "helper_session_limit" && failure.retryable == true -> R.string.hosted_help_busy
+        failure.code == "helper_concurrency_limit" -> R.string.hosted_help_busy
+        failure.code in setOf("helper_budget_exhausted", "helper_session_limit") -> R.string.hosted_extra_help_limit
+        failure.code == "helper_output_refused" -> R.string.error_request_refused
+        failure.code == "helper_output_incomplete" -> R.string.error_incomplete_response
+        failure.code == "provider_connection_lost" -> R.string.error_transport_network_lost
+        failure.code == "helper_session_funding_unavailable" -> R.string.hosted_help_funding
+        failure.code in setOf("provider_reconciliation_required", "minute_balance_reconciliation_required", "minute_purchase_reconciliation_required", "helper_provider_reconciliation_required") -> R.string.hosted_balance_checking
+        failure.code == "helper_session_window_closed" -> R.string.hosted_window_closed
+        failure.code in setOf("helper_request_already_attempted", "helper_response_uncertain", "live_request_already_created", "provider_session_unconfirmed") -> R.string.hosted_unconfirmed
+        failure.code == "live_session_unresolved" -> R.string.hosted_checking_previous
+        failure.code == "provider_create_rejected" -> R.string.hosted_start_rejected
+        failure.status == 429 -> R.string.hosted_rate_limit
+        failure.code in setOf("hosted_voice_not_ready", "hosted_helpers_not_ready", "hosted_paid_not_ready", "hosted_funding_cap_reached") -> R.string.hosted_unavailable
+        else -> R.string.hosted_request_failed
+    }
+    else -> R.string.hosted_request_failed
+}
+
+internal fun needsAccountRecovery(error: Throwable): Boolean = error == HostedFailure.SignInRequired ||
+    (error is HostedFailure.Http && (error.status == 401 || error.code == "sign_in_to_continue")) ||
+    (error is AccountFailure.Http && error.status == 401)
+
+internal fun requestErrorReference(error: Throwable): String? = safeRequestErrorReference(when (error) {
+    is HostedFailure.Http -> error.reference
+    is AccountFailure.Http -> error.reference
+    else -> null
+})
 
 /** Whether the failure means the learner needs to add or fix their OpenAI key in Settings. */
 internal fun errorNeedsKeySetup(e: Throwable): Boolean =
@@ -56,16 +105,25 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
     var state by mutableStateOf("idle"); private set
     var error by mutableStateOf<String?>(null); private set
     var errorNeedsKeySetup by mutableStateOf(false); private set
+    var errorNeedsAccountSignIn by mutableStateOf(false); private set
+    var typedReplyError by mutableStateOf<String?>(null); private set
+    var typedRepliesSent by mutableStateOf(0); private set
+    fun clearTypedReplyError() { typedReplyError = null }
     var notice by mutableStateOf<String?>(null); private set
     var meaning by mutableStateOf(""); private set
     var translating by mutableStateOf(false); private set
     var meaningFailed by mutableStateOf(false); private set
+    var meaningLimitReached by mutableStateOf(false); private set
     var working by mutableStateOf(false); private set
     var isMuted by mutableStateOf(false); private set
     var inputLevel by mutableStateOf(0.0); private set
     var outputLevel by mutableStateOf(0.0); private set
     var selectedTheme by mutableStateOf<ConversationTheme?>(null); private set
     var lookupResult by mutableStateOf<String?>(null); private set
+    var lookupError by mutableStateOf<String?>(null); private set
+    var lookupLoading by mutableStateOf(false); private set
+    private var lookupGeneration = 0L
+    private var lookupJob: Job? = null
     var topicResult by mutableStateOf<TopicBrief?>(null); private set
     var hasKey by mutableStateOf(false); private set
     val language get() = LanguageRegistry.get(archive.preferences.learningLanguageID)!!
@@ -96,6 +154,7 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
     private var pendingHostedOwnerID: String? = null
     /** Reauthentication may renew this account only; another account cannot replace an unresolved owner. */
     suspend fun pendingMemberForSignIn(): String? {
+        clearAcknowledgedGuestMarker()
         guests?.expectedMemberID()?.let { return it }
         val pending = pendingHostedOwnerID ?: return null
         if (guests?.owns(pending) != true) return pending
@@ -144,8 +203,9 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
         retryDelay = HostedHelperRetry::automaticDelay) { request ->
         if (archive.preferences.aiConsentVersion != 1) throw IllegalStateException("AI processing consent is required.")
         val module = LanguageRegistry.get(request.learningLanguageID) ?: throw IllegalStateException("Unsupported language.")
+        if (request.sessionID in hostedSessionIDs && request.translationInput.toByteArray(Charsets.UTF_8).size > 24_576) throw MeaningInputLimitException()
         val result = teaching(request.sessionID, HelperPurpose.MEANING, request.cacheKey,
-            TeachingPolicy.translation(module, request.meaningLanguage), request.text.takeLast(2200))
+            TeachingPolicy.translation(module, request.meaningLanguage), request.translationInput)
         MeaningResult(result.text, result.usage.input, result.usage.output)
     }
     private val finalAssessments = FinalAssessmentQueue(viewModelScope) { snapshot, passage -> requestAssessment(snapshot, passage) }
@@ -154,7 +214,11 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
     private var lastLanguageRedirect: String? = null
     private val delegations = mutableMapOf<String, Job>()
     private var voiceSession = false
-    private var lastActivity = nowSeconds()
+    private var activity = ConversationActivity(activityNow())
+    private var conversationPace = ConversationPace()
+    var inactivitySeconds by mutableStateOf<Int?>(null); private set
+    private fun activityNow() = System.nanoTime() / 1_000_000_000.0
+    fun noteTypingActivity() { if (state == "active" && voiceSession) { activity.typing(activityNow()); inactivitySeconds = null } }
     private var generation = 0
 
     init {
@@ -167,6 +231,9 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
                 hostedSessionIDs = providers.hostedIDs
                 pendingHostedOwnerID = providers.pendingOwnerID
                 accountChangeBlocked = providers.pendingOwnerID != null
+                guests?.recoverAcknowledgedOwnerAtStartup(pendingHostedOwnerID,
+                    clear = { owner -> clearAcknowledgedGuestMarker(owner) },
+                    onFailure = { presentError(getApplication<Application>().getString(R.string.error_guest_secure_storage_unavailable)) })
                 conversationProvider = providers.selection
                 finalAssessmentTickets = ConversationProviderPolicy.recoveryTickets(loaded.first.finalAssessments, hostedSessionIDs)
                 hasKey = loaded.second
@@ -208,9 +275,12 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
         transport.onFailure = { fail(it) }
         transport.onLevels = { input, output ->
             inputLevel = input; outputLevel = output
-            if (input > 0.03 || output > 0.03) lastActivity = nowSeconds()
+            if (state == "active" && voiceSession) {
+                if (input > 0.03) activity.inputActive(activityNow())
+                if (output > 0.03) activity.assistantActive(activityNow())
+            }
         }
-        meanings.onChange = { meaning = meanings.text; translating = meanings.isLoading; meaningFailed = meanings.error != null }
+        meanings.onChange = { meaning = meanings.text; translating = meanings.isLoading; meaningFailed = meanings.error != null; meaningLimitReached = meanings.error is MeaningInputLimitException }
         meanings.onResult = { request, result ->
             if (session?.id == request.sessionID) updateSession {
                 it.translations[request.cacheKey] = result.text
@@ -280,19 +350,22 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
     private fun resolveMessage(e: Throwable, @StringRes fallback: Int): String {
         val app = getApplication<Application>()
         val res = errorMessageRes(e)
-        return when {
+        val message = when {
             res == R.string.error_http_generic && e is APIClient.APIException.Http -> app.getString(res, e.status)
-            e is HostedFailure -> hostedMessage(e)
             res != 0 -> app.getString(res)
             e is LiveTransport.TransportException -> e.message ?: app.getString(fallback)
             else -> app.getString(fallback)
         }
+        if (e is APIClient.APIException.Http && e.reference != null)
+            return message + "\n\n" + app.getString(R.string.error_provider_reference, e.reference)
+        return requestErrorReference(e)?.let { message + "\n\n" + app.getString(R.string.hosted_error_reference, it) } ?: message
     }
     private fun presentError(message: String, needsKeySetup: Boolean = false) {
-        error = message; errorNeedsKeySetup = needsKeySetup
+        error = message; errorNeedsKeySetup = needsKeySetup; errorNeedsAccountSignIn = false
     }
     private fun presentError(e: Throwable, @StringRes fallback: Int) {
         presentError(resolveMessage(e, fallback), errorNeedsKeySetup(e))
+        errorNeedsAccountSignIn = needsAccountRecovery(e)
     }
     private fun cloudReady(): Boolean {
         if (!storageReady) { presentError(getApplication<Application>().getString(R.string.error_resolve_local_history_first)); return false }
@@ -330,10 +403,10 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val member = memberSessions?.read()?.takeIf { it.isValid(System.currentTimeMillis()) }
                 if (member != null) {
+                    clearAcknowledgedGuestMarker()
                     if (guests?.needsLink() == true) {
                         readiness.selectAccount(null, true)
-                        if (pendingHostedOwnerID != null && !settleHostedSessions()) return@launch
-                        if (!guests.linkTo(member)) return@launch
+                        if (!completeGuestSignIn() && guests.memberMaySpend(member.accountID) != true) return@launch
                     }
                     if (selectedAccount.busy) return@launch
                     readiness.selectAccount(member.accountID, false)
@@ -344,7 +417,7 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     guests?.acquire()
                     if (selectedAccount.busy) return@launch
-                    val guest = guests?.session()
+                    val guest = guests?.availableSession()
                     readiness.selectAccount(guest?.accountID, false)
                     readiness.refresh()
                 }
@@ -358,21 +431,54 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
         if (hostedReadiness.ready && !selectedAccount.busy) return false
         showMinuteAccess = true; refreshHostedReadiness(); return true
     }
-    /** Durable guest transfer survives Activity cancellation and retries before the member can spend. */
+    suspend fun prepareGuestCustodyForDeletion(memberID: String) {
+        try { guests?.retireAcknowledgedLinkForDeletion(memberID) }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { throw AccountFailure.SecureStorage }
+    }
+
+    /** Two encrypted stores are not crash-atomic. The durable guest receipt repairs only its marker. */
+    private suspend fun clearAcknowledgedGuestMarker() {
+        guests?.recoverAcknowledgedOwner(pendingHostedOwnerID) { owner -> clearAcknowledgedGuestMarker(owner) }
+    }
+    private suspend fun clearAcknowledgedGuestMarker(owner: String) {
+        providerStore.clearPending()
+        pendingHostedOwnerID = null; accountChangeBlocked = false
+        hostedBindings.delegateOwnerRecovery(owner)
+    }
+
+    /** Member spending requires a durable server acknowledgment; guest transfer may finish later. */
     suspend fun completeGuestSignIn(): Boolean {
         val member = memberSessions?.read()?.takeIf { it.isValid(System.currentTimeMillis()) } ?: return false
-        val linked = guests?.linkTo(member) ?: true
-        if (!linked) showMinuteAccess = true
-        return linked
+        val guestOwner = guests?.retainedOwnerID()
+        if (guestOwner != null && pendingHostedOwnerID == guestOwner) {
+            if (isRunning) return false
+            // Finish pending local provenance writes before handing remote recovery to the server.
+            connectionJob?.join()
+            reconciliationJob?.cancelAndJoin()
+        }
+        val accepted = guests?.linkTo(member, allowDeferred = true) ?: true
+        val safe = accepted || guests?.memberMaySpend(member.accountID) == true
+        if (safe && guestOwner != null && pendingHostedOwnerID == guestOwner) {
+            // The retained GuestInstallation still owns its bearer and acknowledged member binding.
+            // Server recovery owns the old lease; never close it with the new member bearer.
+            withContext(NonCancellable) {
+                providerStore.clearPending()
+                pendingHostedOwnerID = null; accountChangeBlocked = false
+                hostedBindings.delegateOwnerRecovery(guestOwner)
+            }
+        }
+        if (!safe) showMinuteAccess = true
+        return safe
     }
     private suspend fun availableHostedOwner(): AccountSession? {
         val member = memberSessions?.read()?.takeIf { it.isValid(System.currentTimeMillis()) }
-        if (member != null) return member.takeIf { guests?.needsLink() != true }
-        return guests?.session()
+        if (member != null) return member.takeIf { guests?.needsLink() != true || guests?.memberMaySpend(member.accountID) == true }
+        return guests?.availableSession()
     }
     private suspend fun requireHostedOwner(ownerID: String? = null): AccountSession {
         // The pending guest lease must still be closable after Google has stored a member bearer.
-        val guest = if (ownerID != null) guests?.session(ownerID) else null
+        val guest = if (ownerID != null) guests?.sessionForSettlement(ownerID) else null
         return guest ?: availableHostedOwner()?.takeIf { ownerID == null || it.accountID == ownerID }
             ?: throw HostedFailure.SignInRequired
     }
@@ -400,21 +506,35 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
         if (snapshot.id in hostedSessionIDs) ConversationHistory.helperContext(snapshot, passage)
         else TeachingPolicy.context(snapshot, passage)
 
-    private fun hostedMessage(failure: HostedFailure): String = when (failure) {
-        HostedFailure.SignInRequired -> getApplication<Application>().getString(R.string.hosted_sign_in)
-        HostedFailure.Unconfirmed -> getApplication<Application>().getString(R.string.hosted_unconfirmed)
-        HostedFailure.Unavailable -> getApplication<Application>().getString(R.string.hosted_unavailable)
-        is HostedFailure.Http -> when (failure.code) {
-            "insufficient_minutes", "insufficient_credit" -> getApplication<Application>().getString(R.string.hosted_no_minutes)
-            "helper_budget_exhausted", "helper_session_limit" -> getApplication<Application>().getString(R.string.hosted_extra_help_limit)
-            "helper_session_window_closed" -> getApplication<Application>().getString(R.string.hosted_window_closed)
-            "helper_request_already_attempted", "helper_response_uncertain", "live_request_already_created", "provider_session_unconfirmed" ->
-                getApplication<Application>().getString(R.string.hosted_unconfirmed)
-            "live_session_unresolved" -> getApplication<Application>().getString(R.string.hosted_checking_previous)
-            else -> getApplication<Application>().getString(R.string.hosted_request_failed)
-        }
-        else -> getApplication<Application>().getString(R.string.hosted_request_failed)
+    /** Renewing a member token must not turn a retained guest transfer back into an OAuth gate. */
+    suspend fun settleRenewedMember(): Boolean {
+        val pending = pendingHostedOwnerID ?: return true
+        if (guests?.owns(pending) == true) return true
+        return prepareForAccountChange()
     }
+
+    /** Google identity can be added while guest accounting finishes; guest credentials stay separate. */
+    suspend fun prepareForSignIn(): Boolean = AccountSignInPreparation(
+        finishLocalWork = {
+            if (!storageReady) {
+                presentError(getApplication<Application>().getString(R.string.error_resolve_local_history_first))
+                false
+            } else {
+                hostedBindings.disableHelpers(); meanings.reset()
+                if (isRunning && (session?.id in hostedSessionIDs || conversationProvider == ConversationProvider.HOSTED_MINUTES)) {
+                    updateSession { it.endReason = "Signing in" }; finish(false)
+                }
+                hostedFinalAssessmentJobs.values.toList().forEach { it.cancel() }; hostedFinalAssessmentJobs.clear()
+                // Wait only for local startup/provenance persistence, never remote guest settlement.
+                awaitLocalSignInStartup(connectionJob) {
+                    presentError(getApplication<Application>().getString(R.string.error_sign_in_finishing_startup))
+                }
+            }
+        },
+        pendingOwner = { pendingHostedOwnerID },
+        guestOwns = { guests?.owns(it) == true },
+        prepareAccountChange = { prepareForAccountChange() },
+    ).prepare()
 
     /** Root UI wiring must use this before sign-out, deletion, account switching, or session revocation. */
     suspend fun prepareForAccountChange(): Boolean {
@@ -453,7 +573,8 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
         return try {
             val owner = requireHostedOwner(ownerID)
             if (owner.accountID != ownerID) return false
-            for (id in hostedBindings.openSessionIDs) if (!hostedBindings.closeAndConfirm(id)) return false
+            for (id in hostedBindings.openSessionIDs.filter { hostedBindings.owner(it) == ownerID })
+                if (!hostedBindings.closeAndConfirm(id)) return false
             // An interrupted create may have committed remotely without returning its lease locally.
             val client = hostedClient(ownerID)
             val current = client.currentSession()
@@ -476,8 +597,12 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
         catch (_: Exception) { false }
     }
 
-    fun dismissError() { error = null; errorNeedsKeySetup = false }
-    fun clearLookup() { lookupResult = null }
+    fun dismissError() { error = null; errorNeedsKeySetup = false; errorNeedsAccountSignIn = false }
+    fun clearLookup() {
+        lookupGeneration++
+        lookupJob?.cancel()
+        lookupJob = null; lookupResult = null; lookupError = null; lookupLoading = false
+    }
     fun saveKey(key: String) {
         if (isRunning) return
         try { credentials.save(key); hasKey = credentials.hasKey; selectConversationProvider(ConversationProvider.PERSONAL_KEY); recoverFinalAssessments(); notice = getApplication<Application>().getString(R.string.notice_key_saved) }
@@ -493,7 +618,7 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
         if (isRunning || !storageReady) return
         if (LanguageRegistry.get(preferences.learningLanguageID) == null || preferences.meaningLanguage !in MeaningLanguages.all || preferences.sessionMinutes !in 1..60) return
         val languageChanged = preferences.learningLanguageID != language.id
-        actionJob?.cancel(); working = false
+        actionJob?.cancel(); clearLookup(); working = false
         if (preferences.aiConsentVersion != 1) {
             finalAssessments.cancelAll(); hostedBindings.disableHelpers()
             hostedFinalAssessmentJobs.values.toList().forEach { it.cancel() }; hostedFinalAssessmentJobs.clear()
@@ -522,7 +647,7 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
     fun toggleMute() { if (state == "active" && voiceSession) { isMuted = !isMuted; transport.mute(isMuted) } }
     fun help() {
         if (state != "active") return
-        if (voiceSession) { command("instructions", TeachingPolicy.help(language)); notice = getApplication<Application>().getString(R.string.notice_help_simpler) }
+        if (voiceSession) { activity.learnerEngaged(activityNow()); inactivitySeconds = null; conversationPace.askForHelp(session?.passages?.lastOrNull { it.speaker == Speaker.user }); command("instructions", conversationPace.instruction); command("instructions", TeachingPolicy.help(language)); notice = getApplication<Application>().getString(R.string.notice_help_simpler) }
         else {
             if (working || !cloudReady()) return
             val snapshot = session ?: return
@@ -537,7 +662,7 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
                         it.append(Fragment(speaker = Speaker.assistant, text = result.text, startMS = offset, endMS = offset + 1))
                         addUsage(it, result.usage)
                     }
-                    lastActivity = nowSeconds(); scheduleTranslation()
+                    scheduleTranslation()
                 } catch (_: CancellationException) { }
                 catch (e: Exception) { if (token == generation) presentError(e, R.string.error_help_failed) }
                 finally { if (token == generation) working = false }
@@ -546,9 +671,9 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun newSession(voice: Boolean, id: String = UUID.randomUUID().toString()) {
-        generation++; resetJob?.cancel(); assessmentJob?.cancel(); meanings.reset()
-        error = null; errorNeedsKeySetup = false; notice = null; isMuted = false
-        voiceSession = voice; lastActivity = nowSeconds()
+        generation++; resetJob?.cancel(); assessmentJob?.cancel(); actionJob?.cancel(); clearLookup(); working = false; meanings.reset()
+        dismissError(); notice = null; isMuted = false
+        voiceSession = voice
         val record = SessionRecord(id = id, languageID = language.id, themeID = selectedTheme?.id, title = selectedTheme?.title ?: language.defaultTitle)
         topicResult?.takeIf { it.languageID == language.id && selectedTheme?.id == "current" }?.let { record.topics += it }
         session = record; save(record)
@@ -612,7 +737,7 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
         if (state !in listOf("active", "connecting")) return
         val connecting = state == "connecting"
         state = "closing"; isMuted = true
-        connectionJob?.cancel(); durationJob?.cancel(); assessmentJob?.cancel(); actionJob?.cancel()
+        connectionJob?.cancel(); durationJob?.cancel(); assessmentJob?.cancel(); actionJob?.cancel(); clearLookup()
         delegations.values.toList().forEach { it.cancel() }; delegations.clear(); working = false
         updateSession { it.endReason = reason }
         if (!voiceSession || connecting) { finish(false); return }
@@ -621,17 +746,22 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun background() {
         // Leaving the foreground ends the conversation and releases the microphone; its final assessment still completes.
-        generation++; actionJob?.cancel(); meanings.reset(); working = false
+        generation++; actionJob?.cancel(); clearLookup(); meanings.reset(); working = false
         if (isRunning) { updateSession { it.endReason = "App moved to background" }; finish(false) }
     }
     private fun finish(final: Boolean) {
         if (!isRunning) return
         connectionJob?.cancel(); durationJob?.cancel(); closeJob?.cancel(); assessmentJob?.cancel()
-        actionJob?.cancel(); languageCheckJob?.cancel()
+        actionJob?.cancel(); clearLookup(); languageCheckJob?.cancel()
         delegations.values.toList().forEach { it.cancel() }; delegations.clear()
         transport.disconnect(); inputLevel = 0.0; outputLevel = 0.0; working = false; isMuted = false
         updateSession { it.endedAt = nowSeconds(); it.usageFinal = final }
         state = "ended"
+        notice = when (session?.endReason) {
+            "Inactivity" -> getApplication<Application>().getString(R.string.notice_ended_inactivity)
+            "Time limit" -> getApplication<Application>().getString(R.string.notice_time_limit_reached)
+            else -> null
+        }
         session?.let {
             if (it.id in hostedSessionIDs) {
                 hostedBindings.ended(it.id); reconcileHostedSessions(); finishHostedAssessment(clone(it))
@@ -641,10 +771,13 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
         resetJob = viewModelScope.launch { delay(15000); if (state == "ended") resetConversation() }
     }
     private fun fail(message: String, needsKeySetup: Boolean = false) { finish(false); resetJob?.cancel(); state = "failed"; presentError(message, needsKeySetup) }
-    private fun fail(e: Throwable, @StringRes fallback: Int) { fail(resolveMessage(e, fallback), errorNeedsKeySetup(e)) }
+    private fun fail(e: Throwable, @StringRes fallback: Int) {
+        fail(resolveMessage(e, fallback), errorNeedsKeySetup(e))
+        errorNeedsAccountSignIn = needsAccountRecovery(e)
+    }
     fun resetConversation() {
         if (isRunning) return
-        generation++; resetJob?.cancel(); actionJob?.cancel(); assessmentJob?.cancel(); languageCheckJob?.cancel(); meanings.reset()
+        generation++; resetJob?.cancel(); actionJob?.cancel(); clearLookup(); assessmentJob?.cancel(); languageCheckJob?.cancel(); meanings.reset()
         session = null; selectedTheme = null; topicResult = null
         notice = null; working = false; state = "idle"; voiceSession = false
     }
@@ -660,7 +793,7 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
         when (event["type"]?.jsonPrimitive?.content) {
             "mural.session.created" -> updateSession { it.providerID = (event["session"] as? JsonObject)?.get("id")?.jsonPrimitive?.content; it.voiceSeconds = 15.0 }
             "session.started" -> if (state == "connecting") {
-                state = "active"; lastActivity = nowSeconds()
+                state = "active"; activity = ConversationActivity(activityNow()); conversationPace = ConversationPace(); inactivitySeconds = null
                 updateSession { it.providerID = (event["session"] as? JsonObject)?.get("id")?.jsonPrimitive?.content ?: it.providerID }
                 command("instructions", TeachingPolicy.greeting(language)); startDurationChecks()
             }
@@ -671,7 +804,10 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
                 if (start < 0 || end < start || text.length > 50000) return
                 val speaker = if (event["type"]?.jsonPrimitive?.content == "session.input_transcript.delta") Speaker.user else Speaker.assistant
                 updateSession { it.append(Fragment(id = event["event_id"]?.jsonPrimitive?.content ?: UUID.randomUUID().toString(), speaker = speaker, text = text, startMS = start, endMS = end, meaningVisible = archive.preferences.meaningVisible)) }
-                lastActivity = nowSeconds()
+                if (text.isNotBlank()) {
+                    if (speaker == Speaker.user) { activity.learnerEngaged(activityNow()); inactivitySeconds = null }
+                    else activity.assistantActive(activityNow())
+                }
                 if (speaker == Speaker.assistant) { scheduleTranslation(); if (state == "active") checkLanguage() } else scheduleAssessment()
             }
             "session.delegation.created" -> {
@@ -690,7 +826,7 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
         durationJob?.cancel()
         durationJob = viewModelScope.launch {
             while (state == "active") {
-                delay(5000)
+                delay(1000)
                 val current = session ?: break
                 if (current.id in hostedSessionIDs && hostedBindings.reachedDeadline(current.id)) {
                     updateSession { it.endReason = "Reserved conversation time ended" }; finish(false); break
@@ -698,7 +834,13 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
                 if (nowSeconds() - current.startedAt > archive.preferences.sessionMinutes * 60) {
                     notice = getApplication<Application>().getString(R.string.notice_time_limit_reached); end("Time limit"); break
                 }
-                if (SessionLimits.endsForInactivity(voiceSession, nowSeconds() - lastActivity)) { notice = getApplication<Application>().getString(R.string.notice_ended_inactivity); end("Inactivity"); break }
+                inactivitySeconds = null
+                if (voiceSession) when (val next = activity.tick(activityNow(), isMuted, working || delegations.isNotEmpty())) {
+                    ConversationActivity.Action.CheckIn -> command("instructions", TeachingPolicy.checkIn(language))
+                    is ConversationActivity.Action.Warning -> inactivitySeconds = next.seconds
+                    ConversationActivity.Action.End -> { notice = getApplication<Application>().getString(R.string.notice_ended_inactivity); end("Inactivity"); break }
+                    ConversationActivity.Action.Wait -> Unit
+                }
             }
         }
     }
@@ -800,6 +942,9 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
                 if (session?.id == updated.id) session = clone(updated)
                 if (state == "active" && session?.id == snapshot.id) {
                     val progress = learner
+                    if (voiceSession && conversationPace.observe(valid, passage, snapshot.languageID)) {
+                        command("instructions", conversationPace.instruction)
+                    }
                     val targetLanguage = LanguageRegistry.get(snapshot.languageID)?.name ?: language.name
                     val revisit = progress.words.filter { it.dueAt < nowSeconds() }.take(3).joinToString(", ") { it.lemma }
                     command("thinking", "Teaching context, not spoken text: challenge ${progress.challenge}/5 in $targetLanguage. Next goal: ${progress.nextGoal}. Revisit naturally: $revisit.")
@@ -825,6 +970,7 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
     fun sendTyped(text: String) {
+        typedReplyError = null
         val clean = text.trim().take(2000)
         if (clean.isEmpty() || working || state in listOf("connecting", "closing") || !cloudReady()) return
         if (state != "active") {
@@ -835,39 +981,56 @@ class MuralViewModel(application: Application) : AndroidViewModel(application) {
         }
         val id = session!!.id; val token = generation
         val offset = ((nowSeconds() - session!!.startedAt) * 1000).toInt().coerceAtLeast(0)
-        updateSession { it.append(Fragment(speaker = Speaker.user, text = clean, startMS = offset, endMS = offset + 1, meaningVisible = archive.preferences.meaningVisible, typed = true)) }
-        lastActivity = nowSeconds(); working = true
+        val fragment = Fragment(speaker = Speaker.user, text = clean, startMS = offset, endMS = offset + 1, meaningVisible = archive.preferences.meaningVisible, typed = true)
+        val draft = clone(session!!).also { it.append(fragment) }
+        if (voiceSession) { activity.learnerEngaged(activityNow()); inactivitySeconds = null }; working = true
         actionJob = viewModelScope.launch {
             try {
                 val instructions = if (voiceSession) TeachingPolicy.typedReply(language) else TeachingPolicy.voice(language, learner, selectedTheme, archive.preferences.interests, archive.preferences.meaningLanguage) + "\n" + TeachingPolicy.typedReply(language)
-                val result = teaching(id, HelperPurpose.TYPED_REPLY, UUID.randomUUID().toString(), instructions, helperContext(session!!))
+                val result = teaching(id, HelperPurpose.TYPED_REPLY, UUID.randomUUID().toString(), instructions, helperContext(draft))
                 if (token != generation || session?.id != id || state != "active") return@launch
                 updateSession { addUsage(it, result.usage) }
-                if (voiceSession) { command("thinking", "The learner typed (data): ${clean.take(650)}"); command("commentary", result.text) }
-                else {
+                if (voiceSession) {
+                    if (!command("thinking", "The learner typed (data): ${clean.take(650)}") || !command("commentary", result.text)) {
+                        typedReplyError = getApplication<Application>().getString(R.string.error_send_message_failed)
+                        return@launch
+                    }
+                    updateSession { it.append(fragment) }
+                } else {
+                    updateSession { it.append(fragment) }
                     val end = ((nowSeconds() - session!!.startedAt) * 1000).toInt().coerceAtLeast(offset + 2)
                     updateSession { it.append(Fragment(speaker = Speaker.assistant, text = result.text, startMS = end, endMS = end + 1)) }
                     scheduleTranslation()
                 }
+                typedRepliesSent++
                 scheduleAssessment()
             } catch (_: CancellationException) { }
-            catch (e: Exception) { if (session?.id == id) presentError(e, R.string.error_send_message_failed) }
+            catch (e: Exception) {
+                if (session?.id == id) {
+                    typedReplyError = resolveMessage(e, R.string.error_send_message_failed)
+                    if (errorNeedsKeySetup(e) || needsAccountRecovery(e)) presentError(e, R.string.error_send_message_failed)
+                }
+            }
             finally { if (token == generation) working = false }
         }
     }
     fun lookup(word: String, sentence: String) {
-        if (!cloudReady() || working || word.isBlank()) return
-        val token = generation; val id = session?.id; working = true; lookupResult = null
-        actionJob = viewModelScope.launch {
+        if (!cloudReady() || word.isBlank()) return
+        clearLookup()
+        val token = generation; val id = session?.id; val request = lookupGeneration
+        lookupLoading = true
+        lookupJob = viewModelScope.launch {
             try {
                 val result = teaching(id, HelperPurpose.LOOKUP, UUID.randomUUID().toString(),
                     TeachingPolicy.lookup(language, archive.preferences.meaningLanguage), "Selected: ${word.take(200)}\nSentence: ${sentence.take(2200)}")
-                if (token != generation) return@launch
+                if (token != generation || request != lookupGeneration) return@launch
                 lookupResult = result.text
                 if (session?.id == id) updateSession { addUsage(it, result.usage) }
             } catch (_: CancellationException) { }
-            catch (e: Exception) { presentError(e, R.string.error_lookup_word_failed) }
-            finally { if (token == generation) working = false }
+            catch (e: Exception) {
+                if (token == generation && request == lookupGeneration) lookupError = resolveMessage(e, R.string.error_lookup_word_failed)
+            }
+            finally { if (request == lookupGeneration) lookupLoading = false }
         }
     }
     fun currentTopic(query: String) {

@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import MuralCore
 @preconcurrency import WebRTC
 
 enum ConnectionState: Equatable { case idle, connecting, active, closing, ended, failed }
@@ -19,6 +20,13 @@ enum ConnectionState: Equatable { case idle, connecting, active, closing, ended,
     private var closing = false
     private var ownsAudioActivation = false
     private var lastInput = 0.0, lastOutput = 0.0
+    private lazy var networkRecovery = makeNetworkRecovery()
+    private func makeNetworkRecovery(timeout: Duration = .seconds(8)) -> VoiceConnectionRecovery {
+        VoiceConnectionRecovery(timeout: timeout) { [weak self] in
+            guard let self, self.peer != nil, !self.closing else { return }
+            self.onFailure?("The network connection was lost. Tap to start a new conversation.")
+        }
+    }
 
     func connect(api: APIClient, instructions: String, history: [[String: Any]]) async throws {
         disconnect()
@@ -104,10 +112,12 @@ enum ConnectionState: Equatable { case idle, connecting, active, closing, ended,
         _ = send(["type": muted ? "session.input_audio.mute" : "session.input_audio.unmute", "event_id": UUID().uuidString])
     }
     func close() {
+        networkRecovery.connected()
         closing = true; localTrack?.isEnabled = false; isMuted = true
         _ = send(["type": "session.close", "event_id": UUID().uuidString])
     }
     func disconnect() {
+        networkRecovery.connected()
         attempt = UUID(); meterTask?.cancel(); meterTask = nil
         started = false; closing = true
         localTrack?.isEnabled = false; localTrack = nil
@@ -143,6 +153,55 @@ enum ConnectionState: Equatable { case idle, connecting, active, closing, ended,
             }
         }
     }
+    #if DEBUG && targetEnvironment(simulator)
+    // Offline lifecycle fixture drives the real WebRTC delegate and both teardown paths.
+    // No microphone, network handshake or learner data is used.
+    static func verifyRecoveryLifecycle() async -> Bool {
+        let transport = LiveTransport()
+        transport.networkRecovery = transport.makeNetworkRecovery(timeout: .milliseconds(80))
+        var failures = 0
+        transport.onFailure = { _ in failures += 1 }
+        func installPeer() -> RTCPeerConnection? {
+            let factory = RTCPeerConnectionFactory()
+            transport.factory = factory
+            let peer = factory.peerConnection(with: RTCConfiguration(), constraints: RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil), delegate: transport)
+            transport.peer = peer; transport.closing = false
+            return peer
+        }
+        func deliver(_ peer: RTCPeerConnection, _ state: RTCIceConnectionState) async {
+            transport.peerConnection(peer, didChange: state)
+            try? await Task.sleep(for: .milliseconds(15))
+        }
+        defer { transport.disconnect() }
+        for closeFirst in [true, false] {
+            guard let old = installPeer() else { return false }
+            await deliver(old, .disconnected)
+            if closeFirst { transport.close() } else { transport.disconnect() }
+            // Observe cancellation before the next connection's normal reset could mask it.
+            try? await Task.sleep(for: .milliseconds(110))
+            guard failures == 0 else { return false }
+            transport.disconnect()
+            guard let current = installPeer() else { return false }
+            await deliver(old, .disconnected)
+            await deliver(old, .failed)
+            await deliver(current, .disconnected)
+            await deliver(current, .connected)
+            try? await Task.sleep(for: .milliseconds(110))
+            guard failures == 0 else { return false }
+            transport.disconnect()
+        }
+        guard let peer = installPeer() else { return false }
+        await deliver(peer, .disconnected)
+        await deliver(peer, .disconnected)
+        try? await Task.sleep(for: .milliseconds(110))
+        guard failures == 1 else { return false }
+        await deliver(peer, .completed)
+        await deliver(peer, .disconnected)
+        try? await Task.sleep(for: .milliseconds(110))
+        return failures == 2
+    }
+    #endif
+
     enum TransportError: LocalizedError {
         case microphone, connection, timeout
         var errorDescription: String? {
@@ -179,7 +238,14 @@ extension LiveTransport: RTCDataChannelDelegate, RTCPeerConnectionDelegate {
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
         Task { @MainActor [weak self] in
             guard let self, peerConnection === self.peer, !self.closing else { return }
-            if newState == .failed { self.onFailure?("The network connection was lost. Tap to start a new conversation.") }
+            switch newState {
+            case .disconnected: self.networkRecovery.disconnected()
+            case .connected, .completed: self.networkRecovery.connected()
+            case .failed:
+                self.networkRecovery.connected()
+                self.onFailure?("The network connection was lost. Tap to start a new conversation.")
+            default: break
+            }
         }
     }
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {}

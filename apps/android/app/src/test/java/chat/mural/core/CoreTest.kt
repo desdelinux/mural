@@ -20,6 +20,22 @@ class CoreTest {
         val typed=Fragment(id="c",speaker=Speaker.assistant,text="typed",startMS=500,endMS=600,typed=true)
         assertEquals(2,Transcript.passages(listOf(a,b,typed)).size)
     }
+    @Test fun transcriptConcatenationInsertsSpaceBetweenBareFragmentBoundaries() {
+        val a=Fragment(id="a",speaker=Speaker.assistant,text="It is easy.",startMS=0,endMS=100)
+        val b=Fragment(id="b",speaker=Speaker.assistant,text="Now you?",startMS=400,endMS=700)
+        assertEquals("It is easy. Now you?",Transcript.passages(listOf(a,b))[0].text)
+        val c=Fragment(id="c",speaker=Speaker.assistant,text="Hei",startMS=0,endMS=100)
+        val d=Fragment(id="d",speaker=Speaker.assistant,text="!",startMS=100,endMS=150)
+        assertEquals("Hei!",Transcript.passages(listOf(c,d))[0].text)
+    }
+    @Test fun joiningPreservesMandarinAndUnicodeBoundaries() {
+        assertEquals("我喜欢咖啡。你呢？", Passage.join(listOf("我", "喜欢", "咖啡。", "你呢？")))
+        assertEquals("“Hola!”", Passage.join(listOf("“", "Hola", "!”")))
+        val punctuation = String(Character.toChars(0x10100))
+        assertEquals("Hola" + punctuation, Passage.join(listOf("Hola", punctuation)))
+        assertEquals("Hola\u00A0mundo", Passage.join(listOf("Hola\u00A0", "mundo")))
+        assertEquals("Hello. Again.", Passage.join(listOf("", "Hello.", "", "Again.")))
+    }
     @Test fun supportedAndWrongLanguageEvidenceCannotBecomeIndependent() {
         val supported=evidence(supported=true)
         assertEquals(EvidenceKind.assisted,LearningEngine.validate(supported.assessments[0],supported)!!.words[0].kind)
@@ -52,6 +68,11 @@ class CoreTest {
         assertEquals(listOf("nb","es","en","fr","de","it","pt","zh"),LanguageRegistry.all.map { it.id })
         assertEquals(24,Themes.shared.map { it.id }.toSet().size)
         assertEquals("Salut !",LanguageRegistry.get("fr")!!.greeting)
+        for ((id, locale, greeting) in listOf(Triple("de","de-DE","Hallo!"),Triple("it","it-IT","Ciao!"),Triple("pt","pt-BR","Olá!"),Triple("zh","zh-CN","你好！"))) {
+            assertEquals(locale,LanguageRegistry.get(id)!!.locale); assertEquals(greeting,LanguageRegistry.get(id)!!.greeting)
+        }
+        assertTrue(MeaningLanguages.all.contains("Chinese (Simplified)"))
+        assertEquals("你好！",MeaningLanguages.greeting("Chinese (Simplified)"))
         assertEquals("Norwegian",LanguageRegistry.get("nb")!!.name)
         assertEquals("Hei!",MeaningLanguages.greeting("Norwegian"))
     }

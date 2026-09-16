@@ -24,11 +24,11 @@ If `apps/android/.signing/debug.keystore` exists (it is ignored by Git), the deb
 
 Mural speaks the interface language of your phone: Spanish on a Spanish phone, English otherwise. That is separate from the language you practise and the language you read meanings in, which you choose next.
 
-Choose the language you practise and the language for meanings. Read the consent to send audio and text to OpenAI. You can decline and still browse your local data.
+Choose the language you practise and the language for meanings. When you practise Mandarin, captions link each word and show pinyin underneath on Android 10 or later; **Hide pinyin** keeps the characters only. Read the consent to send audio and text to OpenAI. You can decline and still browse your local data.
 
 In **Settings**, save your own OpenAI key. Do not send it through chat or put it in repository files. It is encrypted with an Android Keystore key and is never included in learning backups.
 
-On **Talk**, start a conversation and allow the microphone. You should hear a greeting in the language you chose. **Type instead** lets you practise without the microphone. You can mute, ask for a little help, show meanings, tap a word to look it up, and end the conversation. Any conversation ends when the app moves to the background. A voice conversation also ends when audio is interrupted, when it reaches the chosen duration, or after two minutes without activity; a written conversation stays open while you compose a reply.
+On **Talk**, start a conversation and allow the microphone. You should hear a greeting in the language you chose. **Type instead** lets you practise without the microphone. You can mute, ask for a little help, show meanings, tap a word to look it up, and end the conversation. Any conversation ends when the app moves to the background. A voice conversation also ends when audio is interrupted, when it reaches the chosen duration, or after 30 seconds of quiet, with a gentle check-in and a five-second countdown. Speaking or typing gives you time to continue; waiting for an answer also receives a bounded grace period; a written conversation stays open while you compose a reply.
 
 Mural needs the internet to talk, translate and search. History and vocabulary are available offline. Requests are billed to your OpenAI project; **Settings** shows recorded voice time and a voice cost estimate. The app's time limit is not a billing cap.
 

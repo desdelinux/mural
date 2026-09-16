@@ -1,6 +1,9 @@
+import { linkGuestMinutes, finalizeDeferredGuestLinks } from '../src/guest-minutes.js';
+import { digest } from '../src/auth.js';
+import { reserveMinutes, finishMinuteReservation } from '../src/minutes.js';
 import { after, before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { connectDatabase, transaction } from '../src/db.js';
 import { migrate } from '../src/migrate.js';
@@ -232,7 +235,7 @@ integration('the restricted runtime settles paid helpers while provenance and fu
     GRANT UPDATE(balance_ms,reserved_ms,sandbox_balance_ms) ON minute_wallets TO ${role};
     GRANT SELECT ON minute_purchase_transactions TO ${role};
     GRANT UPDATE ON wallets TO ${role}`);
-  for(const file of ['hosted-helper-runtime-grants.sql','actual-value-runtime-grants.sql']) {
+  for(const file of ['minute-runtime-grants.sql','hosted-helper-runtime-grants.sql','actual-value-runtime-grants.sql']) {
     const grants=await readFile(new URL(`../operations/${file}`,import.meta.url),'utf8');await db!.query(grants.replaceAll('mural_runtime',role));
   }
   const runtimeURL=new URL(databaseURL!);runtimeURL.searchParams.set('options',`-c search_path=${schema} -c role=${role}`);
@@ -281,4 +284,24 @@ integration('a legacy cash experiment quarantines only its owner before a later 
     await f.controller.start();await assert.rejects(f.create(),{code:'cash_balance_reconciliation_required'});
     assert.equal(f.voice.creates,1);assert.equal((await f.balance()).availableNanoUSD,'0');
   }finally{await legacy?.stop();await f.close();}
+});
+
+integration('a pending guest transfer cannot freeze the verified member paid wallet or change its charge',async()=>{
+ const f=await fixture();try{
+  const guest=randomUUID(),token=randomBytes(32).toString('base64url');
+  await db!.query('INSERT INTO accounts(id,is_guest) VALUES($1,true)',[guest]);
+  await db!.query("INSERT INTO auth_sessions(id,account_id,token_hash,expires_at) VALUES($1,$2,$3,now()+interval '1 hour')",[randomUUID(),guest,digest(token)]);
+  await transaction(db!,sql=>appendMinuteEntry(sql,guest,`guest-seed:${guest}`,'welcome',600000,0));
+  await db!.query('INSERT INTO minute_welcome_claims(proof_reference,account_id,allowance_ms) VALUES($1,$2,600000)',[`test:${guest}`,guest]);
+  const hold=await reserveMinutes(db!,guest,'guest-unsettled',600000);
+  const before=await f.balance();await linkGuestMinutes(db!,f.account,token,true);
+  assert.deepEqual(await f.balance(),before);
+  const paid=await f.create(60000);assert.equal(paid.fundingMode,'ai-value');
+  assert.equal((await linkGuestMinutes(db!,f.account,undefined,true,guest)).pending,true);
+  await f.emit(paid,30,true);await f.expire(paid.sessionID);
+  assert.equal((await f.balance()).balanceNanoUSD,'1975000000');
+  assert.equal((await db!.query('SELECT reserved_ms FROM minute_wallets WHERE account_id=$1',[guest])).rows[0].reserved_ms,'600000');
+  await finishMinuteReservation(db!,hold,600000);await finalizeDeferredGuestLinks(db!);
+  assert.equal((await f.balance()).balanceNanoUSD,'1975000000');await f.invariant();
+ }finally{await f.close();}
 });

@@ -13,6 +13,8 @@ struct RootView: View {
             store.updatePreferences { $0.hasOnboarded = true }
         }
         if let screen = ScreenshotPreview.screen { coordinator.prepareScreenshot(screen) }
+        coordinator.prepareTypedReplyPreview()
+        coordinator.prepareConversationPolicyPreview()
         _tab = State(initialValue: ScreenshotPreview.tab)
         #endif
         _coordinator = State(initialValue: coordinator)
@@ -51,6 +53,12 @@ struct RootView: View {
         }
         #if DEBUG
         .task {
+            #if targetEnvironment(simulator)
+            if ProcessInfo.processInfo.arguments.contains("--verify-network-recovery") {
+                coordinator.notice = await LiveTransport.verifyRecoveryLifecycle() ? "Network recovery lifecycle passed" : "Network recovery lifecycle failed"
+                return
+            }
+            #endif
             if AudioVerification.requested { await AudioVerification.run(coordinator) }
             else if ProcessInfo.processInfo.arguments.contains("--ended-conversation") { coordinator.prepareEndedPreview() }
         }
@@ -85,9 +93,17 @@ struct TalkView: View {
                     Spacer(minLength: 8)
                     MuralOrb(energy: max(coordinator.outputLevel, coordinator.inputLevel * 0.45), listening: coordinator.state == .active && !coordinator.isMuted, active: coordinator.state != .closing)
                         .frame(width: typeSize.isAccessibilitySize ? 170 : 220, height: typeSize.isAccessibilitySize ? 180 : 222).padding(.vertical, 8)
-                    Text(coordinator.status).font(.system(.caption, design: .rounded)).foregroundStyle(MuralColor.secondary)
-                        .contentTransition(.numericText()).padding(.top, 6).padding(.bottom, 16).accessibilityAddTraits(.updatesFrequently)
-                        .accessibilityIdentifier("conversation-status")
+                    VStack(spacing: 2) {
+                        if coordinator.state == .active, let seconds = coordinator.inactivitySeconds {
+                            Text("Ending in \(seconds)s").fontWeight(.medium).monospacedDigit()
+                            Text("Reply to continue").font(.system(.caption2, design: .rounded))
+                        } else { Text(coordinator.status) }
+                    }
+                    .font(.system(.caption, design: .rounded)).foregroundStyle(MuralColor.secondary)
+                    .multilineTextAlignment(.center).frame(minHeight: 36)
+                    .padding(.top, 6).padding(.bottom, 16)
+                    .accessibilityElement(children: .ignore).accessibilityLabel(coordinator.status)
+                    .accessibilityAddTraits([.isStaticText, .updatesFrequently]).accessibilityIdentifier("conversation-status")
                     captionArea
                     Spacer(minLength: 12)
                     controls
@@ -228,15 +244,26 @@ struct TypedReplyView: View {
     @FocusState private var focused: Bool
     var body: some View {
         NavigationStack {
+            ScrollViewReader { proxy in
+            ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                Text("Say it your way.").font(.system(.title, design: .rounded, weight: .semibold))
-                TextField("Reply in \(coordinator.language.name) or another language", text: $text, axis: .vertical).lineLimit(3...6).focused($focused).padding(18).background(.white, in: RoundedRectangle(cornerRadius: 22))
-                Button { sending = true; Task { await coordinator.sendTyped(text); sending = false; dismiss() } } label: {
-                    HStack { Text(sending ? "Sending…" : "Send reply"); Spacer(); Image(systemName: "arrow.up") }.padding(18).background(MuralColor.orange, in: Capsule())
-                }.disabled(sending || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Text("Say it your way.").font(.system(.title, design: .rounded, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
+                TextField("Reply in \(coordinator.language.name) or another language", text: $text, axis: .vertical).lineLimit(3...6).focused($focused).padding(18).background(.white, in: RoundedRectangle(cornerRadius: 22)).accessibilityIdentifier("typed-reply-input")
+                    .onChange(of: text) { _, _ in coordinator.noteTypingActivity() }
+                if let error = coordinator.typedReplyError {
+                    Text(error).font(.footnote).foregroundStyle(MuralColor.secondary).fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("typed-reply-error")
+                }
+                Button { sending = true; Task { let ok = await coordinator.sendTyped(text); sending = false; if ok { dismiss() } } } label: {
+                    HStack { Text(sending ? "Sending…" : "Send reply").fixedSize(horizontal: false, vertical: true); Spacer(); Image(systemName: "arrow.up") }.padding(18).background(MuralColor.orange, in: Capsule())
+                }.disabled(sending || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityIdentifier("typed-reply-send").id("typed-reply-send")
                 Spacer()
-            }.padding(26).foregroundStyle(MuralColor.ink).background(MuralColor.cream)
+            }.padding(26).frame(maxWidth: .infinity, alignment: .leading).foregroundStyle(MuralColor.ink)
+            }.accessibilityIdentifier("typed-reply-scroll").background(MuralColor.cream)
+                .onChange(of: coordinator.typedReplyError) { _, error in
+                    if error != nil { withAnimation { proxy.scrollTo("typed-reply-send", anchor: .bottom) } }
+                }
+            }
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } } }
-        }.presentationDetents([.medium, .large]).onAppear { focused = true }
+        }.presentationDetents([.medium, .large]).onAppear { coordinator.typedReplyError = nil; coordinator.noteTypingActivity(); focused = true }
     }
 }

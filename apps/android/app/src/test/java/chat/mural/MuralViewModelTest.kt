@@ -1,5 +1,7 @@
 package chat.mural
 
+import chat.mural.core.AccountFailure
+import chat.mural.network.HostedFailure
 import chat.mural.core.Archive
 import chat.mural.core.ArchiveCodec
 import chat.mural.core.Fragment
@@ -77,4 +79,37 @@ class MuralViewModelTest {
         assertFalse(errorNeedsKeySetup(APIClient.APIException.Refused))
         assertFalse(errorNeedsKeySetup(CredentialStore.CredentialException.Invalid))
     }
+    @Test fun hostedSignInFailuresRecoverThroughAccountAndNeverPersonalKeySetup() {
+        for (error in listOf(HostedFailure.SignInRequired, HostedFailure.Http(401, "sign_in_required"),
+            HostedFailure.Http(403, "sign_in_to_continue"), AccountFailure.Http(401, "sign_in_required"))) {
+            assertEquals(R.string.hosted_sign_in_again, errorMessageRes(error))
+            assertTrue(needsAccountRecovery(error))
+            assertFalse(errorNeedsKeySetup(error))
+        }
+        assertFalse(needsAccountRecovery(HostedFailure.Http(503, "internal")))
+        assertEquals(R.string.hosted_rate_limit, errorMessageRes(HostedFailure.Http(429, "rate_limit")))
+        assertEquals(R.string.hosted_start_rejected, errorMessageRes(HostedFailure.Http(502, "provider_create_rejected")))
+    }
+
+    @Test fun onlySafeOpaqueReferencesReachTheErrorMessage() {
+        assertEquals("0123abcdef45", requestErrorReference(HostedFailure.Http(500, "internal", reference = "0123abcdef45")))
+        assertEquals("0123abcdef45", requestErrorReference(AccountFailure.Http(500, "internal", "0123abcdef45")))
+        for (value in listOf("person@example.com", "0123ABCDEF45", "0123abcdef45\n", "", "123")) {
+            assertEquals(null, requestErrorReference(HostedFailure.Http(500, "internal", reference = value)))
+            assertEquals(null, requestErrorReference(AccountFailure.Http(500, "internal", value)))
+        }
+    }
+
+    @Test fun recoveryAdviceDistinguishesQuotaBusyLimitsAndUnconfirmedBilling() {
+        assertEquals(R.string.error_provider_quota, errorMessageRes(APIClient.APIException.Http(429, "insufficient_quota")))
+        assertEquals(R.string.error_http_429, errorMessageRes(APIClient.APIException.Http(429, "rate_limit_exceeded")))
+        assertEquals(R.string.error_request_timeout, errorMessageRes(java.net.SocketTimeoutException()))
+        assertEquals(R.string.error_request_connection, errorMessageRes(java.net.UnknownHostException()))
+        assertEquals(R.string.hosted_help_busy, errorMessageRes(HostedFailure.Http(429, "helper_session_limit", retryable = true)))
+        assertEquals(R.string.hosted_extra_help_limit, errorMessageRes(HostedFailure.Http(429, "helper_session_limit", retryable = false)))
+        assertEquals(R.string.hosted_balance_checking, errorMessageRes(HostedFailure.Http(503, "provider_reconciliation_required")))
+        assertEquals(R.string.hosted_help_funding, errorMessageRes(HostedFailure.Http(503, "helper_session_funding_unavailable")))
+        assertEquals(R.string.error_request_refused, errorMessageRes(HostedFailure.Http(502, "helper_output_refused")))
+    }
+
 }

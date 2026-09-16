@@ -12,6 +12,11 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     restart: unless-stopped
   migrate:
     build: .
@@ -39,6 +44,11 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     restart: unless-stopped
     read_only: true
     tmpfs: [/tmp]
@@ -54,6 +64,11 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     depends_on: [api]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     restart: unless-stopped
 volumes:
   postgres_data:

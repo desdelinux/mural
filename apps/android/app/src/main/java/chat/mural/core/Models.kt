@@ -21,7 +21,37 @@ data class Fragment(
 )
 
 data class Passage(val id: String, val speaker: Speaker, val fragments: List<Fragment>) {
-    val text get() = fragments.joinToString("") { it.text }
+    val text get() = join(fragments.map { it.text })
+    companion object {
+        /** Join fragment texts. Insert one space only when both sides lack boundary whitespace
+         *  and the next fragment does not start with punctuation (so "Hei" + "!" stays "Hei!"). */
+        fun join(parts: List<String>): String = parts.fold("") { result, part ->
+            val first = part.takeIf { it.isNotEmpty() }?.codePointAt(0)
+            val last = result.takeIf { it.isNotEmpty() }?.codePointBefore(result.length)
+            when {
+                result.isEmpty() -> part
+                last == null || first == null -> result + part
+                Character.isWhitespace(last) || Character.isSpaceChar(last) || Character.isWhitespace(first) || Character.isSpaceChar(first) || isPunctuation(first) || isUnspacedBoundary(last, first) -> result + part
+                else -> "$result $part"
+            }
+        }
+        private fun isUnspacedBoundary(last: Int, first: Int): Boolean {
+            fun han(c: Int) = c in 0x3400..0x4DBF || c in 0x4E00..0x9FFF || c in 0xF900..0xFAFF || c in 0x20000..0x323AF
+            val type = Character.getType(last)
+            val opening = type == Character.START_PUNCTUATION.toInt() || type == Character.INITIAL_QUOTE_PUNCTUATION.toInt()
+            return opening || (han(first) && (han(last) || last in 0x3000..0x303F || last in 0xFF00..0xFFEF))
+        }
+        private fun isPunctuation(c: Int): Boolean {
+            val type = Character.getType(c)
+            return type == Character.CONNECTOR_PUNCTUATION.toInt() ||
+                type == Character.DASH_PUNCTUATION.toInt() ||
+                type == Character.START_PUNCTUATION.toInt() ||
+                type == Character.END_PUNCTUATION.toInt() ||
+                type == Character.INITIAL_QUOTE_PUNCTUATION.toInt() ||
+                type == Character.FINAL_QUOTE_PUNCTUATION.toInt() ||
+                type == Character.OTHER_PUNCTUATION.toInt()
+        }
+    }
     val revisionKey get() = fragments.joinToString(",") { "${it.id}:${it.revision}" }
     val startMS get() = fragments.firstOrNull()?.startMS ?: 0
     val endMS get() = fragments.maxOfOrNull { it.endMS } ?: 0
@@ -45,12 +75,17 @@ object Transcript {
     }
 }
 
+/** Swift compares strings by canonical equivalence; Kotlin needs the same form on both sides. */
+fun String.canonical(): String = java.text.Normalizer.normalize(this, java.text.Normalizer.Form.NFC)
+
+fun String.containsCanonical(other: String): Boolean = canonical().contains(other.canonical(), ignoreCase = true)
+
 @Serializable
 data class WordProposal(
     val lemma: String, val meaning: String, val form: String, val kind: EvidenceKind,
     val confidence: Double, val sourceIDs: List<String>, val quote: String,
     val language: String = LanguageRegistry.defaultID
-) { val key get() = "${language}|${lemma.trim().lowercase()}|${meaning.lowercase()}" }
+) { val key get() = "${language}|${lemma.trim().lowercase().canonical()}|${meaning.lowercase().canonical()}" }
 
 @Serializable
 data class Assessment(
@@ -88,7 +123,15 @@ data class SessionRecord(
     fun correctFragment(id: String, text: String) {
         val i = fragments.indexOfFirst { it.id == id }; if (i < 0) return
         val f = fragments[i]; fragments[i] = f.copy(previousTexts = f.previousTexts + f.text, text = text, revision = f.revision + 1)
-        translations.clear(); invalidateChangedAssessments()
+        translations.keys.filter { translationKeyIncludesFragment(it, id) }.forEach { translations.remove(it) }
+        invalidateChangedAssessments()
+    }
+    companion object {
+        fun translationKeyIncludesFragment(key: String, id: String): Boolean {
+            val revision = key.substringAfter("::", missingDelimiterValue = "")
+            if (revision.isEmpty()) return false
+            return revision.split(',').any { part -> part.substringBefore(':') == id }
+        }
     }
 }
 @Serializable

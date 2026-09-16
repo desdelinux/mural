@@ -86,7 +86,7 @@ All monetary strings are integer **nanoUSD**: 1 USD = 1,000,000,000 nanoUSD. A d
 | `GET /v1/minutes` | Guest or member bearer token | Exact time balance, reservation and available milliseconds |
 | `POST /v1/guest/minutes` | Verified guest attestation proof | Guest session and remaining allowance; disabled without a verified adapter |
 | `POST /v1/minutes/welcome` | Member token and account-bound attestation proof | Claims the signup offer once within allocation budgets |
-| `POST /v1/minutes/link-guest` | Member token; `guestAccessToken` | Transfers unused guest time once after its reservations settle |
+| `POST /v1/minutes/link-guest` | Member token; `guestAccessToken`, optional `deferPending` and `guestAccountID` | Transfers settled guest time; opted-in clients can retain an unsettled transfer without blocking member funds |
 | `POST /v1/auth/sign-out` | Bearer token | Revokes this account's Mural sessions |
 | `DELETE /v1/account` | Bearer token; Apple additionally needs a fresh authorization code | Removes identity/email/session data; retains required financial records under an opaque ID |
 | `GET /v1/pricing` | None | Dated provider rates, money units, and separate-fee policy |
@@ -149,3 +149,31 @@ Local verification on 12 September 2026: TypeScript build and checks passed. **4
 The adapter follows [OpenAI WebRTC creation](https://developers.openai.com/api/docs/guides/voice-webrtc?api=live), [authenticated sideband controls](https://developers.openai.com/api/docs/guides/voice-server-controls?api=live), [cumulative and final usage](https://developers.openai.com/api/docs/guides/live-conversations#usage-and-graceful-close), and the [hangup endpoint](https://developers.openai.com/api/reference/typescript/resources/live/subresources/sessions/methods/hangup). The WebRTC/SIP documentation discrepancy above remains an activation blocker.
 
 Apple revocation follows [authorization-code validation](https://developer.apple.com/documentation/signinwithapplerestapi/generate-and-validate-tokens), [token revocation](https://developer.apple.com/documentation/signinwithapplerestapi/revoke-tokens), and the [client-secret contract linked from Apple's Sign in with Apple documentation](https://developer.apple.com/documentation/accountorganizationaldatasharing/creating-a-client-secret). Checkout retry handling follows [Stripe's idempotency retention contract](https://docs.stripe.com/api/idempotent_requests).
+
+### Deferred guest transfer
+
+`POST /v1/minutes/link-guest` authenticates the member using its bearer token. The initial request supplies `guestAccessToken`. `deferPending` defaults to `false`: existing clients receive `409 finish_guest_conversation_first` while the guest has reserved minutes or an unresolved hosted session.
+
+With `deferPending: true`, a valid guest bearer establishes an immutable guest-to-member binding. A pending result is `{ "transferredMilliseconds": 0, "alreadyLinked": false, "outcome": "pending", "pending": true }`. This confirms ownership, not completion of accounting. The member's own gifts and verified purchases remain usable. Guest holds and provider liabilities stay on the guest account; the binding requests closure and prevents new guest conversations, installation resume and duplicate member welcome claims.
+
+A retry can use the original guest bearer, including after its expiry once the binding exists. A member-only retry supplies `{ "deferPending": true, "guestAccountID": "<original guest UUID>" }`. The member and exact guest must match the stored binding. `404 guest_link_not_found` means no matching owned binding; a missing guest ID is invalid. An optional guest ID alongside the initial bearer must identify the same guest (`409 guest_link_mismatch` otherwise). An expired bearer without a prior binding returns `401 invalid_guest_session`; it does not establish ownership.
+
+After provider accounting settles, a retry or the background worker completes the transfer once. Successful opted-in results contain `pending: false` and the existing `transferred` or `member_trial_already_claimed` outcome. The latter transfers zero additional trial time. Clients retain the original guest identity until that guest's terminal result; another device's result cannot clear it. Sign-out does not remove the binding. If the member deletes its account first, finalization forfeits remaining guest promotional time only after settlement and records `member_deleted`; it never recreates the member or transfers a late grant.
+
+The worker starts with the API and checks up to 25 eligible bindings every 60 seconds. A held balance or unresolved hosted session stays pending; no timeout, hangup acknowledgment or last observed duration substitutes for final provider usage. Migration 023 adds immutable `minute_guest_link_intents` and `minute_guest_link_completions`; `operations/minute-runtime-grants.sql` grants runtime only `SELECT, INSERT` on them. The existing final transfer journal remains unchanged.
+
+## Diagnose requests and voice closure
+
+The API process writes one JSON record per completed or failed request, plus provider attempts, voice lifecycle transitions and background failures. A failed HTTP response includes `X-Mural-Error-Reference`; match that 12-character reference to the `reference` field in the log. Related provider requests inherit the same reference, even when requests overlap. Voice lifecycle records also carry a shortened opaque `sessionReference`.
+
+Records include UTC time, level, event, the matched route template or fixed operation, status, duration and safe failure categories. Provider records may include a sanitized request ID and HTTP status. Database failures use categories such as `database_permission`, `database_constraint` or `database_unavailable`; a source filename and line may help locate an unexpected application failure. Bodies, transcripts, authorization headers, tokens, query strings, raw error messages, SQL and full stack traces are excluded. New application error categories must be added to `src/diagnostic-error-codes.ts`; unknown categories appear as `internal`.
+
+For container deployments:
+
+```sh
+docker compose logs --since 30m api
+```
+
+Filter the JSON records by the learner’s reference. `voice_close_requested` means a close was requested; `voice_closed` is emitted after confirmed usage settlement. A lost connection or failed hangup must not be treated as billing confirmation. Do not retry a billed provider create merely because its result is uncertain.
+
+Compose rotates API, proxy and database logs at 10 MB with five files retained per container. This is a local size limit, not an off-server archive or a time-based retention guarantee. Restrict operational-log access and configure any longer retention separately. Logging failures cannot change request, settlement or authentication results.
